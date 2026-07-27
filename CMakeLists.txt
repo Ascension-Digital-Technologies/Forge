@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(Forge
- VERSION 1.0.1
+ VERSION 1.0.0
  DESCRIPTION "Verified deterministic compiler core and x86-64 backend"
  LANGUAGES CXX)
 option(FORGE_BUILD_TESTS "Build Forge tests" ON)

@@ -22,7 +22,7 @@ struct BlockHandle { std::size_t function_index{}; std::size_t block_index{}; };
 
 class IRBuilder {
 public:
-    IRBuilder(Context& context, Module& module) noexcept : context_(&context), module_(&module) {}
+    IRBuilder(Context&, Module& module) noexcept : module_(&module) {}
 
     [[nodiscard]] Function& create_function(std::string name, Type return_type,
                                             std::vector<ValueDecl> parameters = {}, bool external = false);
@@ -83,7 +83,6 @@ public:
 private:
     [[nodiscard]] std::string next_value_name();
     Operation& append(Operation operation);
-    Context* context_{};
     Module* module_{};
     Block* block_{};
     SourceLocation location_{};

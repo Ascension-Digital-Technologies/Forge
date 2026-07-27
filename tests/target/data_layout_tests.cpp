@@ -86,8 +86,7 @@ int main() {
 
         const std::array invalid_struct{forge::ir::Type(forge::ir::TypeKind::void_)};
         require(!layout.struct_layout(invalid_struct).has_value(), "void structure field unexpectedly has a layout");
-        const std::array<forge::ir::Type, 0> empty_struct{};
-        const auto empty_layout = layout.struct_layout(empty_struct);
+        const auto empty_layout = layout.struct_layout(std::span<const forge::ir::Type>{});
         require(empty_layout.has_value() && empty_layout->size == 0 && empty_layout->alignment == 1,
                 "empty structure layout mismatch");
 

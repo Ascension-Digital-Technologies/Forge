@@ -20,7 +20,6 @@ constexpr std::uint32_t sht_progbits = 1;
 constexpr std::uint32_t sht_symtab = 2;
 constexpr std::uint32_t sht_strtab = 3;
 constexpr std::uint32_t sht_rela = 4;
-constexpr std::uint32_t sht_note = 7;
 constexpr std::uint64_t shf_write = 0x1;
 constexpr std::uint64_t shf_alloc = 0x2;
 constexpr std::uint64_t shf_execinstr = 0x4;

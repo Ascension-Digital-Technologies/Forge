@@ -2,7 +2,7 @@
 
 All notable changes to Forge are documented here. Forge follows [Semantic Versioning](https://semver.org/).
 
-## 1.0.1 - 2026-07-27
+## 1.0.0 - 2026-07-27
 
 ### Added
 
@@ -13,8 +13,6 @@ All notable changes to Forge are documented here. Forge follows [Semantic Versio
 
 - Expanded the language-building guide and README to make MiniLang the recommended starting point for frontend authors.
 - Documented stable handle usage, frontend-owned semantic checks, source-range propagation, and interpreter/JIT differential validation.
-
-## 1.0.0 — First stable release
 
 Forge 1.0.0 establishes the first stable public release of the compiler core and frontend SDK.
 
@@ -47,6 +45,9 @@ Forge 1.0.0 establishes the first stable public release of the compiler core and
 - ASan, UBSan, leak, fuzz-smoke, deterministic-output, native-link, and installed-package gates
 - Professional project documentation and package-consumer examples
 - MinGW-safe `windows.h` inclusion under strict `-Werror` builds
+- Clang-clean ELF object writer with dead section constants removed under strict `-Werror` builds
+- Windows Clang/MSVC-STL-safe empty aggregate layout coverage without zero-length `std::array` construction
+- Platform-gated native-link test helpers so Windows strict builds do not fail on unused Unix-only functions
 
 ## Pre-1.0 development
 

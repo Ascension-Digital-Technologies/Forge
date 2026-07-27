@@ -13,11 +13,13 @@
 #include <sys/wait.h>
 #endif
 
+#ifndef _WIN32
 namespace {
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 }
+#endif
 
 int main() {
 #ifndef _WIN32
