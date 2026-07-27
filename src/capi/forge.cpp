@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge-c/forge.h"
 #include "forge/ir/builder.hpp"
 #include "forge/ir/incremental.hpp"
@@ -7,10 +10,12 @@
 #include "forge/ir/printer.hpp"
 #include "forge/ir/source_map.hpp"
 #include "forge/ir/verifier.hpp"
+#include "forge/target/abi.hpp"
 #include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <sstream>
 #include <vector>
 
 struct forge_context { forge::ir::Context value; };
@@ -37,6 +42,39 @@ forge::ir::Type type_of(forge_type_kind_t kind) {
     }
     return forge::ir::Type(TypeKind::void_);
 }
+
+forge::ir::CallingConvention calling_convention_of(forge_calling_convention_t value) {
+    switch (value) {
+    case FORGE_CALL_PLATFORM: return forge::ir::CallingConvention::platform;
+    case FORGE_CALL_C: return forge::ir::CallingConvention::c;
+    case FORGE_CALL_SYSTEM_V: return forge::ir::CallingConvention::system_v;
+    case FORGE_CALL_WINDOWS_X64: return forge::ir::CallingConvention::windows_x64;
+    case FORGE_CALL_FAST: return forge::ir::CallingConvention::fast;
+    }
+    return forge::ir::CallingConvention::platform;
+}
+forge::ir::SymbolLinkage linkage_of(forge_symbol_linkage_t value) {
+    switch (value) {
+    case FORGE_LINKAGE_EXTERNAL: return forge::ir::SymbolLinkage::external;
+    case FORGE_LINKAGE_INTERNAL: return forge::ir::SymbolLinkage::internal;
+    case FORGE_LINKAGE_WEAK: return forge::ir::SymbolLinkage::weak;
+    }
+    return forge::ir::SymbolLinkage::external;
+}
+forge::ir::SymbolVisibility visibility_of(forge_symbol_visibility_t value) {
+    return value == FORGE_VISIBILITY_HIDDEN ? forge::ir::SymbolVisibility::hidden
+                                            : forge::ir::SymbolVisibility::default_;
+}
+size_t copy_text(std::string_view text, char* output, size_t capacity) {
+    const size_t required = text.size() + 1;
+    if (output && capacity) {
+        const auto count = std::min(capacity - 1, text.size());
+        std::memcpy(output, text.data(), count);
+        output[count] = '\0';
+    }
+    return required;
+}
+
 forge::ir::Opcode opcode_of(forge_opcode_t opcode) {
     using forge::ir::Opcode;
     switch (opcode) {
@@ -111,6 +149,20 @@ forge_function_t* forge_function_create(forge_module_t* module, const char* name
     } catch (...) { set_error("failed to create function"); return nullptr; }
 }
 void forge_function_destroy(forge_function_t* function) { delete function; }
+int forge_function_set_abi(forge_function_t* function,
+                           forge_calling_convention_t calling_convention,
+                           int variadic,
+                           forge_symbol_linkage_t linkage,
+                           forge_symbol_visibility_t visibility) {
+    auto* resolved = resolve(function);
+    if (!resolved) { set_error("function is invalid"); return 0; }
+    resolved->calling_convention = calling_convention_of(calling_convention);
+    resolved->variadic = variadic != 0;
+    resolved->linkage = linkage_of(linkage);
+    resolved->visibility = visibility_of(visibility);
+    last_error.clear();
+    return 1;
+}
 forge_block_t* forge_block_create_with_parameters(forge_function_t* function, const char* name,
                                                    const forge_type_kind_t* parameter_types, size_t parameter_count) {
     auto* fn = resolve(function);
@@ -336,6 +388,36 @@ size_t forge_module_parallel_build_schedule_json(const forge_module_t* previous_
     }
     last_error.clear();
     return required;
+}
+size_t forge_module_function_abi_json(const forge_module_t* module,
+                                      const char* function_name,
+                                      forge_native_abi_t abi,
+                                      char* output, size_t capacity) {
+    if (!module || !module->value || !function_name) { set_error("module or function name is null"); return 0; }
+    const auto found = std::find_if(module->value->functions().begin(), module->value->functions().end(),
+        [&](const forge::ir::Function& function) { return function.name == function_name; });
+    if (found == module->value->functions().end()) { set_error("function not found"); return 0; }
+    const auto native_abi = abi == FORGE_ABI_WINDOWS_X64 ? forge::target::NativeAbi::windows_x64
+                                                         : forge::target::NativeAbi::system_v_x86_64;
+    const auto classified = forge::target::classify_function(*module->value, *found, native_abi);
+    std::ostringstream json;
+    json << "{\"function\":\"" << found->name << "\",\"variadic\":" << (classified.variadic ? "true" : "false")
+         << ",\"integerRegisters\":" << classified.integer_registers
+         << ",\"floatingRegisters\":" << classified.floating_registers
+         << ",\"stackBytes\":" << classified.stack_bytes
+         << ",\"parameters\":[";
+    for (size_t index = 0; index < classified.parameters.size(); ++index) {
+        if (index) json << ',';
+        const auto& parameter = classified.parameters[index];
+        json << "{\"size\":" << parameter.size << ",\"alignment\":" << parameter.alignment
+             << ",\"registerCount\":" << static_cast<unsigned>(parameter.register_count)
+             << ",\"indirect\":" << (parameter.passed_indirectly ? "true" : "false")
+             << ",\"classes\":[\"" << forge::target::abi_value_class_name(parameter.classes[0])
+             << "\",\"" << forge::target::abi_value_class_name(parameter.classes[1]) << "\"]}";
+    }
+    json << "]}";
+    last_error.clear();
+    return copy_text(json.str(), output, capacity);
 }
 size_t forge_module_dependency_build_schedule_json(const forge_module_t* previous_module,
                                                    const forge_module_t* current_module,

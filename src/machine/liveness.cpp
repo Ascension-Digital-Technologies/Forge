@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/liveness.hpp"
 
 #include <unordered_map>
@@ -11,10 +14,10 @@ bool has_result(Opcode opcode) noexcept {
     case Opcode::store_stack_i64: case Opcode::store_stack_f32: case Opcode::store_stack_f64:
     case Opcode::store_ptr_i8: case Opcode::store_ptr_i16: case Opcode::store_ptr_i32:
     case Opcode::store_ptr_i64: case Opcode::store_ptr_f32: case Opcode::store_ptr_f64:
-    case Opcode::call_void: case Opcode::call_indirect_void:
+    case Opcode::call_void: case Opcode::call_aggregate: case Opcode::call_indirect_void:
     case Opcode::jump: case Opcode::branch_i1:
     case Opcode::return_i32: case Opcode::return_i64: case Opcode::return_f32:
-    case Opcode::return_f64: case Opcode::return_void:
+    case Opcode::return_f64: case Opcode::return_void: case Opcode::return_aggregate:
         return false;
     default:
         return true;

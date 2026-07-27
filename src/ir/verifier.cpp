@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/verifier.hpp"
 #include "forge/target/data_layout.hpp"
 #include <algorithm>
@@ -61,6 +64,8 @@ Diagnostics verify_module(const Module& module) {
 
     std::unordered_set<std::string> global_names;
     for (const auto& global : module.globals()) {
+        if (global.is_external && global.linkage == SymbolLinkage::internal)
+            diagnostics.push_back({DiagnosticSeverity::error, "external global @" + global.name + " cannot have internal linkage", {}});
         if (!global_names.insert(global.name).second)
             diagnostics.push_back({DiagnosticSeverity::error, "duplicate global @" + global.name, {}});
         std::optional<std::size_t> aggregate_size;
@@ -134,6 +139,12 @@ Diagnostics verify_module(const Module& module) {
             if (value.aggregate_kind == AggregateRefKind::array && !array_table.contains(value.aggregate_name))
                 diagnostics.push_back({DiagnosticSeverity::error, std::string(context) + " references unknown array @" + value.aggregate_name, {}});
         };
+        if (function.is_external && function.linkage == SymbolLinkage::internal)
+            diagnostics.push_back({DiagnosticSeverity::error, "external function @" + function.name + " cannot have internal linkage", {}});
+        if (function.variadic && !function.is_external && !function.is_signature)
+            diagnostics.push_back({DiagnosticSeverity::error, "variadic function @" + function.name + " must be an external declaration or signature", {}});
+        if (function.calling_convention == CallingConvention::fast && function.variadic)
+            diagnostics.push_back({DiagnosticSeverity::error, "variadic function @" + function.name + " cannot use the fast calling convention", {}});
         if (function.return_owned && !function.returns_aggregate())
             diagnostics.push_back({DiagnosticSeverity::error, "owned return from @" + function.name + " requires a named aggregate", {}});
         if (function.return_owned && function.return_borrow_mode != BorrowMode::none)
@@ -269,6 +280,7 @@ Diagnostics verify_module(const Module& module) {
                                 if (a.return_type != b.return_type || a.return_aggregate_kind != b.return_aggregate_kind ||
                                     a.return_aggregate_name != b.return_aggregate_name || a.return_owned != b.return_owned ||
                                     a.return_borrow_mode != b.return_borrow_mode || a.return_borrow_parameter != b.return_borrow_parameter ||
+                                    a.variadic != b.variadic || a.calling_convention != b.calling_convention ||
                                     a.parameters.size() != b.parameters.size()) return false;
                                 for (std::size_t i=0;i<a.parameters.size();++i) {
                                     const auto& x=a.parameters[i]; const auto& y=b.parameters[i];
@@ -623,6 +635,7 @@ Diagnostics verify_module(const Module& module) {
                                     if (left.return_type != right.return_type || left.return_aggregate_kind != right.return_aggregate_kind ||
                                         left.return_aggregate_name != right.return_aggregate_name || left.return_owned != right.return_owned ||
                                         left.return_borrow_mode != right.return_borrow_mode || left.return_borrow_parameter != right.return_borrow_parameter ||
+                                        left.variadic != right.variadic || left.calling_convention != right.calling_convention ||
                                         left.parameters.size() != right.parameters.size()) return false;
                                     for (std::size_t index = 0; index < left.parameters.size(); ++index) {
                                         const auto& a = left.parameters[index]; const auto& b = right.parameters[index];
@@ -637,7 +650,9 @@ Diagnostics verify_module(const Module& module) {
                             if (operation.type != target.return_type)
                                 diagnostics.push_back({DiagnosticSeverity::error, "indirect call return type mismatch for signature " + operation.operands[1], {}});
                             const auto argument_count = operation.operands.size() - 2;
-                            if (argument_count != target.parameters.size())
+                            const bool count_matches = target.variadic ? argument_count >= target.parameters.size()
+                                                                       : argument_count == target.parameters.size();
+                            if (!count_matches)
                                 diagnostics.push_back({DiagnosticSeverity::error, "indirect call argument count mismatch for signature " + operation.operands[1], {}});
                             const auto count = std::min(argument_count, target.parameters.size());
                             for (std::size_t i = 0; i < count; ++i) {
@@ -671,7 +686,10 @@ Diagnostics verify_module(const Module& module) {
                                 diagnostics.push_back({DiagnosticSeverity::error, "void call cannot define a result for " + operation.operands[0], {}});
                             if (target.return_type.kind() != TypeKind::void_ && operation.result.empty())
                                 diagnostics.push_back({DiagnosticSeverity::error, "value-returning call requires a result for " + operation.operands[0], {}});
-                            if (operation.operands.size() - 1 != target.parameters.size())
+                            const auto supplied_arguments = operation.operands.size() - 1;
+                            const bool count_matches = target.variadic ? supplied_arguments >= target.parameters.size()
+                                                                       : supplied_arguments == target.parameters.size();
+                            if (!count_matches)
                                 diagnostics.push_back({DiagnosticSeverity::error, "call argument count mismatch for " + operation.operands[0], {}});
                             const auto count = std::min(operation.operands.size() - 1, target.parameters.size());
                             for (std::size_t i = 0; i < count; ++i) {

@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(COMMAND "${FORGE_EXE}" verify "${INPUT}" RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(result EQUAL 0)
   message(FATAL_ERROR "malformed input unexpectedly succeeded")

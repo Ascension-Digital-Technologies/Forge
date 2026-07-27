@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #include <cstddef>
@@ -82,6 +85,14 @@ struct EncodedFunction {
     std::uint32_t callee_saved_allocation_count{};
     std::uint32_t weighted_spill_decision_count{};
     std::uint32_t allocation_copy_hint_count{};
+    std::uint32_t segmented_interval_count{};
+    std::uint32_t live_range_hole_count{};
+    std::uint32_t interference_edge_count{};
+    std::uint32_t hole_aware_register_reuse_count{};
+    std::uint32_t live_range_split_count{};
+    std::uint32_t split_transition_store_count{};
+    std::uint32_t split_transition_load_count{};
+    std::uint32_t split_transition_byte_count{};
     std::uint32_t encoded_byte_count{};
     std::uint32_t frame_size{};
     std::uint32_t allocated_register_count{};

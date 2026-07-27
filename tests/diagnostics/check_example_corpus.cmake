@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 if(NOT DEFINED FORGE OR NOT DEFINED SOURCE_DIR)
   message(FATAL_ERROR "FORGE and SOURCE_DIR are required")
 endif()

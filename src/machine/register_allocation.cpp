@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/register_allocation.hpp"
 #include "forge/machine/liveness.hpp"
 
@@ -59,16 +62,55 @@ bool supports_two_address_reuse(Opcode opcode) {
     }
 }
 
+
+
+bool is_call_opcode(Opcode opcode) noexcept {
+    switch (opcode) {
+    case Opcode::call_i32: case Opcode::call_i64: case Opcode::call_f32: case Opcode::call_f64:
+    case Opcode::call_void: case Opcode::call_aggregate: case Opcode::call_indirect_i32: case Opcode::call_indirect_i64:
+    case Opcode::call_indirect_f32: case Opcode::call_indirect_f64: case Opcode::call_indirect_void:
+        return true;
+    default:
+        return false;
+    }
+}
+
+Opcode split_store_opcode(RegisterClass register_class, std::uint8_t width) noexcept {
+    if (register_class == RegisterClass::floating)
+        return width == 8U ? Opcode::store_stack_f64 : Opcode::store_stack_f32;
+    if (width <= 1U) return Opcode::store_stack_i8;
+    if (width <= 2U) return Opcode::store_stack_i16;
+    if (width <= 4U) return Opcode::store_stack_i32;
+    return Opcode::store_stack_i64;
+}
+
+Opcode split_load_opcode(RegisterClass register_class, std::uint8_t width) noexcept {
+    if (register_class == RegisterClass::floating)
+        return width == 8U ? Opcode::load_stack_f64 : Opcode::load_stack_f32;
+    if (width <= 1U) return Opcode::load_stack_i8;
+    if (width <= 2U) return Opcode::load_stack_i16;
+    if (width <= 4U) return Opcode::load_stack_i32;
+    return Opcode::load_stack_i64;
+}
+
+void rewrite_register(Instruction& instruction, VirtualRegister from, VirtualRegister to) {
+    for (auto& input : instruction.inputs)
+        if (input == from) input = to;
+    for (auto& successor : instruction.successors)
+        for (auto& argument : successor.arguments)
+            if (argument == from) argument = to;
+}
+
 bool produces_result(Opcode opcode) {
     switch (opcode) {
     case Opcode::store_stack_i8: case Opcode::store_stack_i16: case Opcode::store_stack_i32:
     case Opcode::store_stack_i64: case Opcode::store_stack_f32: case Opcode::store_stack_f64:
     case Opcode::store_ptr_i8: case Opcode::store_ptr_i16: case Opcode::store_ptr_i32:
     case Opcode::store_ptr_i64: case Opcode::store_ptr_f32: case Opcode::store_ptr_f64:
-    case Opcode::call_void: case Opcode::call_indirect_void:
+    case Opcode::call_void: case Opcode::call_aggregate: case Opcode::call_indirect_void:
     case Opcode::jump: case Opcode::branch_i1:
     case Opcode::return_i32: case Opcode::return_i64: case Opcode::return_f32:
-    case Opcode::return_f64: case Opcode::return_void:
+    case Opcode::return_f64: case Opcode::return_void: case Opcode::return_aggregate:
         return false;
     default:
         return true;
@@ -76,10 +118,382 @@ bool produces_result(Opcode opcode) {
 }
 } // namespace
 
+LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
+    LiveRangeSplitStats stats;
+    if (function.blocks.empty() || function.register_count == 0U) return stats;
+
+    // Split only where the current ABI model has no cheap register solution:
+    // floating values live across a call and integer pressure above the two
+    // available callee-saved registers. The transformation is deliberately
+    // restricted to values whose remaining uses stay in the same block, which
+    // makes the rename dominance-exact without introducing edge copies.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        const auto liveness = analyze_liveness(function);
+        const auto intervals = compute_live_intervals(function);
+        for (std::size_t block_index = 0; block_index < function.blocks.size() && !changed; ++block_index) {
+            auto& block = function.blocks[block_index];
+            for (std::size_t instruction_index = 0; instruction_index < block.instructions.size(); ++instruction_index) {
+                const auto& call = block.instructions[instruction_index];
+                if (!is_call_opcode(call.opcode)) continue;
+
+                std::vector<VirtualRegister> floating_candidates;
+                std::vector<VirtualRegister> integer_candidates;
+                for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+                    if (!liveness.live_after[block_index][instruction_index][reg] ||
+                        liveness.live_out[block_index][reg] || reg == call.result) continue;
+                    bool used_after = false;
+                    for (std::size_t later = instruction_index + 1U; later < block.instructions.size() && !used_after; ++later) {
+                        const auto& instruction = block.instructions[later];
+                        used_after = std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end();
+                        if (!used_after) {
+                            for (const auto& successor : instruction.successors) {
+                                if (std::find(successor.arguments.begin(), successor.arguments.end(), reg) != successor.arguments.end()) {
+                                    used_after = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!used_after) continue;
+                    const bool floating = reg < function.register_classes.size() &&
+                                          function.register_classes[reg] == RegisterClass::floating;
+                    (floating ? floating_candidates : integer_candidates).push_back(reg);
+                }
+
+                std::stable_sort(integer_candidates.begin(), integer_candidates.end(), [&](VirtualRegister left, VirtualRegister right) {
+                    if (intervals[left].spill_weight != intervals[right].spill_weight)
+                        return intervals[left].spill_weight < intervals[right].spill_weight;
+                    return left < right;
+                });
+                std::vector<VirtualRegister> selected = floating_candidates;
+                if (integer_candidates.size() > 2U)
+                    selected.insert(selected.end(), integer_candidates.begin(), integer_candidates.end() - 2);
+                if (selected.empty()) continue;
+
+                std::vector<Instruction> stores;
+                std::vector<Instruction> loads;
+                stores.reserve(selected.size());
+                loads.reserve(selected.size());
+                std::vector<std::pair<VirtualRegister, VirtualRegister>> replacements;
+                replacements.reserve(selected.size());
+                for (const auto reg : selected) {
+                    const auto width = reg < function.register_widths.size() ? function.register_widths[reg] : 64U;
+                    const auto register_class = reg < function.register_classes.size()
+                        ? function.register_classes[reg] : RegisterClass::integer;
+                    function.local_stack_size += 8U;
+                    const auto offset = -static_cast<std::int64_t>(function.local_stack_size);
+                    stores.push_back({split_store_opcode(register_class, width), 0U, {reg}, offset, 0U, {}, {}});
+                    const auto replacement = function.register_count++;
+                    function.register_widths.push_back(width);
+                    function.register_classes.push_back(register_class);
+                    loads.push_back({split_load_opcode(register_class, width), replacement, {}, offset, 0U, {}, {}});
+                    replacements.emplace_back(reg, replacement);
+                    ++stats.split_values;
+                    ++stats.transition_stores;
+                    ++stats.transition_loads;
+                    stats.transition_bytes += 16U;
+                }
+
+                block.instructions.insert(block.instructions.begin() + static_cast<std::ptrdiff_t>(instruction_index),
+                                          stores.begin(), stores.end());
+                instruction_index += stores.size();
+                block.instructions.insert(block.instructions.begin() + static_cast<std::ptrdiff_t>(instruction_index + 1U),
+                                          loads.begin(), loads.end());
+                const auto rewrite_start = instruction_index + 1U + loads.size();
+                for (std::size_t later = rewrite_start; later < block.instructions.size(); ++later)
+                    for (const auto& [from, to] : replacements)
+                        rewrite_register(block.instructions[later], from, to);
+                changed = true;
+                break;
+            }
+        }
+    }
+    // Extend splitting across a simple CFG continuation. This handles the
+    // common call-at-end-of-block shape when the continuation block has a
+    // single predecessor, so the reload dominates every rewritten use without
+    // requiring critical-edge copies or phi repair.
+    bool cross_block_changed = true;
+    while (cross_block_changed) {
+        cross_block_changed = false;
+        const auto liveness = analyze_liveness(function);
+        const auto intervals = compute_live_intervals(function);
+        std::unordered_map<std::string, std::size_t> block_indices;
+        std::vector<std::uint32_t> predecessor_counts(function.blocks.size(), 0U);
+        for (std::size_t index = 0; index < function.blocks.size(); ++index)
+            block_indices.emplace(function.blocks[index].name, index);
+        for (const auto& block : function.blocks) {
+            if (block.instructions.empty()) continue;
+            for (const auto& successor : block.instructions.back().successors) {
+                const auto target = block_indices.find(successor.block);
+                if (target != block_indices.end()) ++predecessor_counts[target->second];
+            }
+        }
+
+        for (std::size_t block_index = 0; block_index < function.blocks.size() && !cross_block_changed; ++block_index) {
+            auto& block = function.blocks[block_index];
+            if (block.instructions.empty() || block.instructions.back().successors.size() != 1U) continue;
+            const auto successor_it = block_indices.find(block.instructions.back().successors.front().block);
+            if (successor_it == block_indices.end() || predecessor_counts[successor_it->second] != 1U) continue;
+            const auto successor_index = successor_it->second;
+
+            for (std::size_t instruction_index = 0; instruction_index < block.instructions.size(); ++instruction_index) {
+                const auto& call = block.instructions[instruction_index];
+                if (!is_call_opcode(call.opcode)) continue;
+
+                std::vector<VirtualRegister> floating_candidates;
+                std::vector<VirtualRegister> integer_candidates;
+                for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+                    if (!liveness.live_after[block_index][instruction_index][reg] ||
+                        !liveness.live_out[block_index][reg] || reg == call.result) continue;
+                    bool used_later_in_block = false;
+                    for (std::size_t later = instruction_index + 1U; later < block.instructions.size(); ++later) {
+                        const auto& instruction = block.instructions[later];
+                        used_later_in_block = std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end();
+                        if (!used_later_in_block) {
+                            for (const auto& edge : instruction.successors) {
+                                if (std::find(edge.arguments.begin(), edge.arguments.end(), reg) != edge.arguments.end()) {
+                                    used_later_in_block = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (used_later_in_block) break;
+                    }
+                    if (used_later_in_block) continue;
+
+                    bool used_in_successor = false;
+                    for (const auto& instruction : function.blocks[successor_index].instructions) {
+                        if (std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end()) {
+                            used_in_successor = true;
+                            break;
+                        }
+                        for (const auto& edge : instruction.successors) {
+                            if (std::find(edge.arguments.begin(), edge.arguments.end(), reg) != edge.arguments.end()) {
+                                used_in_successor = true;
+                                break;
+                            }
+                        }
+                        if (used_in_successor) break;
+                    }
+                    if (!used_in_successor) continue;
+                    const bool floating = reg < function.register_classes.size() &&
+                                          function.register_classes[reg] == RegisterClass::floating;
+                    (floating ? floating_candidates : integer_candidates).push_back(reg);
+                }
+
+                std::stable_sort(integer_candidates.begin(), integer_candidates.end(), [&](VirtualRegister left, VirtualRegister right) {
+                    if (intervals[left].spill_weight != intervals[right].spill_weight)
+                        return intervals[left].spill_weight < intervals[right].spill_weight;
+                    return left < right;
+                });
+                std::vector<VirtualRegister> selected = floating_candidates;
+                if (integer_candidates.size() > 2U)
+                    selected.insert(selected.end(), integer_candidates.begin(), integer_candidates.end() - 2);
+                if (selected.empty()) continue;
+
+                std::vector<Instruction> stores;
+                std::vector<Instruction> loads;
+                std::vector<std::pair<VirtualRegister, VirtualRegister>> replacements;
+                for (const auto reg : selected) {
+                    const auto width = reg < function.register_widths.size() ? function.register_widths[reg] : 64U;
+                    const auto register_class = reg < function.register_classes.size()
+                        ? function.register_classes[reg] : RegisterClass::integer;
+                    function.local_stack_size += 8U;
+                    const auto offset = -static_cast<std::int64_t>(function.local_stack_size);
+                    stores.push_back({split_store_opcode(register_class, width), 0U, {reg}, offset, 0U, {}, {}});
+                    const auto replacement = function.register_count++;
+                    function.register_widths.push_back(width);
+                    function.register_classes.push_back(register_class);
+                    loads.push_back({split_load_opcode(register_class, width), replacement, {}, offset, 0U, {}, {}});
+                    replacements.emplace_back(reg, replacement);
+                    ++stats.split_values;
+                    ++stats.cross_block_split_values;
+                    ++stats.transition_stores;
+                    ++stats.transition_loads;
+                    stats.transition_bytes += 16U;
+                }
+
+                block.instructions.insert(block.instructions.begin() + static_cast<std::ptrdiff_t>(instruction_index),
+                                          stores.begin(), stores.end());
+                auto& successor_block = function.blocks[successor_index];
+                successor_block.instructions.insert(successor_block.instructions.begin(), loads.begin(), loads.end());
+                for (std::size_t later = loads.size(); later < successor_block.instructions.size(); ++later)
+                    for (const auto& [from, to] : replacements)
+                        rewrite_register(successor_block.instructions[later], from, to);
+                cross_block_changed = true;
+                break;
+            }
+        }
+    }
+
+
+    // Extend splitting through multi-predecessor continuations by introducing
+    // an explicit edge block and a block parameter in the merge block. Every
+    // predecessor supplies either the original value or the post-call reload,
+    // which gives the renamed continuation a proper SSA merge point.
+    bool critical_edge_changed = true;
+    std::uint32_t edge_serial = 0U;
+    while (critical_edge_changed) {
+        critical_edge_changed = false;
+        const auto liveness = analyze_liveness(function);
+        const auto intervals = compute_live_intervals(function);
+        std::unordered_map<std::string, std::size_t> block_indices;
+        std::vector<std::uint32_t> predecessor_counts(function.blocks.size(), 0U);
+        for (std::size_t index = 0; index < function.blocks.size(); ++index)
+            block_indices.emplace(function.blocks[index].name, index);
+        for (const auto& candidate_block : function.blocks) {
+            if (candidate_block.instructions.empty()) continue;
+            for (const auto& successor : candidate_block.instructions.back().successors) {
+                const auto target = block_indices.find(successor.block);
+                if (target != block_indices.end()) ++predecessor_counts[target->second];
+            }
+        }
+
+        for (std::size_t block_index = 0; block_index < function.blocks.size() && !critical_edge_changed; ++block_index) {
+            if (function.blocks[block_index].instructions.empty() ||
+                function.blocks[block_index].instructions.back().successors.size() != 1U) continue;
+            const auto successor_name = function.blocks[block_index].instructions.back().successors.front().block;
+            const auto successor_it = block_indices.find(successor_name);
+            if (successor_it == block_indices.end() || predecessor_counts[successor_it->second] <= 1U) continue;
+            const auto successor_index = successor_it->second;
+
+            for (std::size_t instruction_index = 0;
+                 instruction_index < function.blocks[block_index].instructions.size(); ++instruction_index) {
+                const auto& call = function.blocks[block_index].instructions[instruction_index];
+                if (!is_call_opcode(call.opcode)) continue;
+
+                std::vector<VirtualRegister> floating_candidates;
+                std::vector<VirtualRegister> integer_candidates;
+                for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+                    if (!liveness.live_after[block_index][instruction_index][reg] ||
+                        !liveness.live_out[block_index][reg] || reg == call.result) continue;
+                    bool used_later_in_block = false;
+                    for (std::size_t later = instruction_index + 1U;
+                         later < function.blocks[block_index].instructions.size(); ++later) {
+                        const auto& instruction = function.blocks[block_index].instructions[later];
+                        if (std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end()) {
+                            used_later_in_block = true;
+                            break;
+                        }
+                        for (const auto& edge : instruction.successors) {
+                            if (std::find(edge.arguments.begin(), edge.arguments.end(), reg) != edge.arguments.end()) {
+                                used_later_in_block = true;
+                                break;
+                            }
+                        }
+                        if (used_later_in_block) break;
+                    }
+                    if (used_later_in_block) continue;
+
+                    bool used_in_successor = false;
+                    for (const auto& instruction : function.blocks[successor_index].instructions) {
+                        if (std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end()) {
+                            used_in_successor = true;
+                            break;
+                        }
+                        for (const auto& edge : instruction.successors) {
+                            if (std::find(edge.arguments.begin(), edge.arguments.end(), reg) != edge.arguments.end()) {
+                                used_in_successor = true;
+                                break;
+                            }
+                        }
+                        if (used_in_successor) break;
+                    }
+                    if (!used_in_successor) continue;
+                    const bool floating = reg < function.register_classes.size() &&
+                                          function.register_classes[reg] == RegisterClass::floating;
+                    (floating ? floating_candidates : integer_candidates).push_back(reg);
+                }
+
+                std::stable_sort(integer_candidates.begin(), integer_candidates.end(), [&](VirtualRegister left, VirtualRegister right) {
+                    if (intervals[left].spill_weight != intervals[right].spill_weight)
+                        return intervals[left].spill_weight < intervals[right].spill_weight;
+                    return left < right;
+                });
+                std::vector<VirtualRegister> selected = floating_candidates;
+                if (integer_candidates.size() > 2U)
+                    selected.insert(selected.end(), integer_candidates.begin(), integer_candidates.end() - 2);
+                if (selected.empty()) continue;
+
+                std::vector<Instruction> stores;
+                std::vector<Instruction> reloads;
+                std::vector<std::pair<VirtualRegister, VirtualRegister>> merge_replacements;
+                std::vector<VirtualRegister> reloaded_values;
+                for (const auto reg : selected) {
+                    const auto width = reg < function.register_widths.size() ? function.register_widths[reg] : 64U;
+                    const auto register_class = reg < function.register_classes.size()
+                        ? function.register_classes[reg] : RegisterClass::integer;
+                    function.local_stack_size += 8U;
+                    const auto offset = -static_cast<std::int64_t>(function.local_stack_size);
+                    stores.push_back({split_store_opcode(register_class, width), 0U, {reg}, offset, 0U, {}, {}});
+
+                    const auto reloaded = function.register_count++;
+                    function.register_widths.push_back(width);
+                    function.register_classes.push_back(register_class);
+                    reloads.push_back({split_load_opcode(register_class, width), reloaded, {}, offset, 0U, {}, {}});
+                    reloaded_values.push_back(reloaded);
+
+                    const auto merged = function.register_count++;
+                    function.register_widths.push_back(width);
+                    function.register_classes.push_back(register_class);
+                    merge_replacements.emplace_back(reg, merged);
+                    function.blocks[successor_index].parameters.push_back(merged);
+
+                    ++stats.split_values;
+                    ++stats.cross_block_split_values;
+                    ++stats.critical_edge_split_values;
+                    ++stats.merge_parameters;
+                    ++stats.transition_stores;
+                    ++stats.transition_loads;
+                    stats.transition_bytes += 16U;
+                }
+
+                auto& source_block = function.blocks[block_index];
+                source_block.instructions.insert(
+                    source_block.instructions.begin() + static_cast<std::ptrdiff_t>(instruction_index),
+                    stores.begin(), stores.end());
+
+                const auto edge_name = source_block.name + ".split." + std::to_string(edge_serial++);
+                source_block.instructions.back().successors.front().block = edge_name;
+
+                // All existing incoming edges to the merge block pass the
+                // original values. The newly-created split edge passes reloads.
+                for (auto& incoming_block : function.blocks) {
+                    if (incoming_block.instructions.empty()) continue;
+                    for (auto& incoming : incoming_block.instructions.back().successors) {
+                        if (incoming.block != successor_name) continue;
+                        for (const auto reg : selected) incoming.arguments.push_back(reg);
+                    }
+                }
+
+                for (const auto& [from, to] : merge_replacements) {
+                    for (auto& instruction : function.blocks[successor_index].instructions)
+                        rewrite_register(instruction, from, to);
+                }
+
+                Block edge_block;
+                edge_block.name = edge_name;
+                edge_block.instructions = std::move(reloads);
+                Instruction jump{Opcode::jump, 0U, {}, 0, 0U, {}, {}};
+                jump.successors.push_back({successor_name, reloaded_values});
+                edge_block.instructions.push_back(std::move(jump));
+                function.blocks.push_back(std::move(edge_block));
+                ++stats.critical_edge_blocks;
+                critical_edge_changed = true;
+                break;
+            }
+        }
+    }
+
+    return stats;
+}
+
 std::vector<LiveInterval> compute_live_intervals(const Function& function) {
     std::vector<LiveInterval> intervals(function.register_count);
     for (VirtualRegister reg = 0; reg < function.register_count; ++reg)
-        intervals[reg] = {reg, undefined_position, 0, 0, 0, 0, 0};
+        intervals[reg] = {reg, undefined_position, 0, 0, 0, 0, 0, {}};
 
     const auto block_count = function.blocks.size();
     std::unordered_map<std::string, std::size_t> block_indices;
@@ -176,6 +590,36 @@ std::vector<LiveInterval> compute_live_intervals(const Function& function) {
         }
     }
 
+    // Preserve liveness as disjoint per-block segments instead of only one
+    // bounding range. This exposes holes created by interleaved mutually
+    // exclusive CFG paths and allows the allocator to recover false spills.
+    for (std::size_t block_index = 0; block_index < block_count; ++block_index) {
+        const auto& block = function.blocks[block_index];
+        std::vector<std::uint32_t> first(function.register_count, undefined_position);
+        std::vector<std::uint32_t> last(function.register_count, 0U);
+        const auto mark = [&](VirtualRegister reg, std::uint32_t at) {
+            if (reg >= function.register_count) return;
+            first[reg] = std::min(first[reg], at);
+            last[reg] = std::max(last[reg], at);
+        };
+        for (VirtualRegister reg = 0; reg < function.register_count; ++reg)
+            if (live_in[block_index][reg]) mark(reg, block_starts[block_index]);
+        for (const auto parameter : block.parameters) mark(parameter, block_starts[block_index]);
+        auto at = block_starts[block_index] + 1U;
+        for (const auto& instruction : block.instructions) {
+            for (const auto input : instruction.inputs) mark(input, at);
+            for (const auto& successor : instruction.successors)
+                for (const auto argument : successor.arguments) mark(argument, at);
+            if (produces_result(instruction.opcode)) mark(instruction.result, at);
+            ++at;
+        }
+        for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+            if (live_out[block_index][reg]) mark(reg, block_ends[block_index]);
+            if (first[reg] != undefined_position)
+                intervals[reg].segments.push_back({first[reg], last[reg]});
+        }
+    }
+
     for (auto& interval : intervals) {
         if (interval.start == undefined_position) interval.start = interval.end = 0;
     }
@@ -194,6 +638,13 @@ bool should_spill_active(const Active& active, const LiveInterval& incoming) {
     const auto incoming_priority = spill_priority(incoming);
     if (active_priority != incoming_priority) return active_priority < incoming_priority;
     return active.interval.end > incoming.end;
+}
+
+bool segments_overlap(const LiveInterval& left, const LiveInterval& right) {
+    for (const auto& lhs : left.segments)
+        for (const auto& rhs : right.segments)
+            if (lhs.start <= rhs.end && rhs.start <= lhs.end) return true;
+    return false;
 }
 } // namespace
 
@@ -238,7 +689,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
                 instruction.result < function.register_count)
                 unary_sources[instruction.result] = instruction.inputs.front();
             switch (instruction.opcode) {
-            case Opcode::call_i32: case Opcode::call_i64: case Opcode::call_f32: case Opcode::call_f64: case Opcode::call_void:
+            case Opcode::call_i32: case Opcode::call_i64: case Opcode::call_f32: case Opcode::call_f64: case Opcode::call_void: case Opcode::call_aggregate:
             case Opcode::call_indirect_i32: case Opcode::call_indirect_i64: case Opcode::call_indirect_f32:
             case Opcode::call_indirect_f64: case Opcode::call_indirect_void:
                 call_positions.push_back(position);
@@ -268,12 +719,35 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         if (interval.call_crossing_count != 0U) ++allocation.call_crossing_interval_count;
     }
 
-    // Measure true interval overlap pressure independently per register class.
+    // Measure pressure from disjoint liveness segments rather than bounding
+    // intervals. Interleaved blocks on mutually exclusive CFG paths therefore
+    // no longer inflate pressure or force unnecessary spills.
+    for (const auto& interval : allocation.intervals) {
+        if (interval.segments.size() > 1U) {
+            ++allocation.segmented_interval_count;
+            allocation.live_range_hole_count += static_cast<std::uint32_t>(interval.segments.size() - 1U);
+        }
+    }
+    for (VirtualRegister left = 0; left < function.register_count; ++left) {
+        if (allocation.intervals[left].use_count == 0U) continue;
+        for (VirtualRegister right = left + 1U; right < function.register_count; ++right) {
+            if (allocation.intervals[right].use_count == 0U) continue;
+            const bool left_floating = left < function.register_classes.size() &&
+                                       function.register_classes[left] == RegisterClass::floating;
+            const bool right_floating = right < function.register_classes.size() &&
+                                        function.register_classes[right] == RegisterClass::floating;
+            if (left_floating == right_floating && segments_overlap(allocation.intervals[left], allocation.intervals[right]))
+                ++allocation.interference_edge_count;
+        }
+    }
     for (std::uint32_t scan = 0; scan <= position; ++scan) {
         std::uint32_t integer_pressure = 0;
         std::uint32_t floating_pressure = 0;
         for (const auto& interval : allocation.intervals) {
-            if (interval.start > scan || interval.end < scan || interval.use_count == 0U) continue;
+            if (interval.use_count == 0U) continue;
+            const bool live = std::any_of(interval.segments.begin(), interval.segments.end(),
+                [&](const LiveSegment& segment) { return segment.start <= scan && scan <= segment.end; });
+            if (!live) continue;
             const bool floating = interval.virtual_register < function.register_classes.size() &&
                                   function.register_classes[interval.virtual_register] == RegisterClass::floating;
             if (floating) ++floating_pressure; else ++integer_pressure;
@@ -464,6 +938,118 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         }
         std::sort(integer_active.begin(), integer_active.end(),
             [](const IntegerActive& left, const IntegerActive& right) { return left.interval.end < right.interval.end; });
+    }
+
+    // Recover registers for spills caused only by bounding-range overlap. A
+    // physical register can be shared when no already allocated value of the
+    // same class interferes in any real liveness segment. This is the first
+    // segmented-allocation stage and requires no mid-interval location change.
+    const auto integer_available = [&](VirtualRegister reg, PhysicalRegister physical) {
+        for (VirtualRegister other = 0; other < function.register_count; ++other) {
+            if (other == reg) continue;
+            const auto& location = allocation.locations[other];
+            if (location.kind != LocationKind::physical_register || location.physical != physical) continue;
+            if (segments_overlap(allocation.intervals[reg], allocation.intervals[other])) return false;
+        }
+        return true;
+    };
+    const auto floating_available = [&](VirtualRegister reg, FloatingPhysicalRegister physical) {
+        for (VirtualRegister other = 0; other < function.register_count; ++other) {
+            if (other == reg) continue;
+            const auto& location = allocation.locations[other];
+            if (location.kind != LocationKind::floating_register || location.floating != physical) continue;
+            if (segments_overlap(allocation.intervals[reg], allocation.intervals[other])) return false;
+        }
+        return true;
+    };
+    for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+        if (allocation.locations[reg].kind != LocationKind::stack_slot || allocation.intervals[reg].use_count == 0U)
+            continue;
+        const bool floating = reg < function.register_classes.size() &&
+                              function.register_classes[reg] == RegisterClass::floating;
+        bool recovered = false;
+        if (floating) {
+            if (!crosses_call(allocation.intervals[reg]) && !forced_floating_spill[reg]) {
+                for (const auto physical : floating_physicals) {
+                    if (!floating_available(reg, physical)) continue;
+                    allocation.locations[reg] = {LocationKind::floating_register, PhysicalRegister::r10d, physical, 0};
+                    recovered = true;
+                    break;
+                }
+            }
+        } else {
+            for (const auto physical : integer_physicals) {
+                if (crosses_call(allocation.intervals[reg]) && !is_callee_saved(physical)) continue;
+                if (!integer_available(reg, physical)) continue;
+                allocation.locations[reg] = {LocationKind::physical_register, physical, FloatingPhysicalRegister::xmm2, 0};
+                record_integer_allocation(physical);
+                recovered = true;
+                break;
+            }
+        }
+        if (recovered) {
+            --allocation.spill_count;
+            ++allocation.physical_count;
+            ++allocation.hole_aware_register_reuse_count;
+        }
+    }
+
+
+    // Honor copy affinities after the initial scan and hole-aware recovery.
+    // Local coalescing above handles adjacent intervals. This global stage uses
+    // segmented interference, so copies that cross block boundaries or
+    // liveness holes can still share the source location when no real live
+    // segment conflicts with that physical register.
+    const auto copy_segments_conflict = [](const LiveInterval& source, const LiveInterval& destination) {
+        for (const auto& left : source.segments) {
+            for (const auto& right : destination.segments) {
+                const auto overlap_start = std::max(left.start, right.start);
+                const auto overlap_end = std::min(left.end, right.end);
+                if (overlap_start < overlap_end) return true;
+            }
+        }
+        return false;
+    };
+    for (VirtualRegister destination = 0; destination < function.register_count; ++destination) {
+        const auto source = copy_sources[destination];
+        if (source >= function.register_count || source == destination) continue;
+        if (allocation.intervals[destination].use_count == 0U ||
+            allocation.intervals[source].use_count == 0U) continue;
+        if (copy_segments_conflict(allocation.intervals[source], allocation.intervals[destination])) continue;
+
+        const bool floating = destination < function.register_classes.size() &&
+                              function.register_classes[destination] == RegisterClass::floating;
+        const bool source_floating = source < function.register_classes.size() &&
+                                     function.register_classes[source] == RegisterClass::floating;
+        if (floating != source_floating) continue;
+
+        auto& destination_location = allocation.locations[destination];
+        const auto& source_location = allocation.locations[source];
+        const bool destination_was_spilled = destination_location.kind == LocationKind::stack_slot;
+        bool coalesced = false;
+        if (floating && source_location.kind == LocationKind::floating_register &&
+            !crosses_call(allocation.intervals[destination]) && !forced_floating_spill[destination] &&
+            floating_available(destination, source_location.floating)) {
+            destination_location = {LocationKind::floating_register, PhysicalRegister::r10d,
+                                    source_location.floating, 0};
+            coalesced = true;
+        } else if (!floating && source_location.kind == LocationKind::physical_register &&
+                   (!crosses_call(allocation.intervals[destination]) ||
+                    is_callee_saved(source_location.physical)) &&
+                   integer_available(destination, source_location.physical)) {
+            destination_location = {LocationKind::physical_register, source_location.physical,
+                                    FloatingPhysicalRegister::xmm2, 0};
+            if (destination_was_spilled) record_integer_allocation(source_location.physical);
+            coalesced = true;
+        }
+        if (!coalesced) continue;
+        ++allocation.global_copy_affinity_count;
+        ++allocation.coalesced_copy_count;
+        if (destination_was_spilled) {
+            --allocation.spill_count;
+            ++allocation.physical_count;
+            ++allocation.copy_spills_recovered;
+        }
     }
 
     // Replace stack-backed constants with rematerialized locations before

@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge-c/forge.h"
 #include <cstring>
 #include <iostream>
@@ -12,12 +15,14 @@ int fail(const char* message) {
 }
 
 int main() {
-    if (FORGE_C_API_VERSION != 9) return fail("unexpected C API version");
+    if (FORGE_C_API_VERSION != 10) return fail("unexpected C API version");
     auto* context = forge_context_create();
     auto* module = forge_module_create(context, "c_api_test");
     const forge_type_kind_t parameters[] = {FORGE_TYPE_I64, FORGE_TYPE_I64};
     auto* add = forge_function_create(module, "add", FORGE_TYPE_I64, parameters, 2);
     auto* entry = forge_block_create(add, "entry");
+    if (!forge_function_set_abi(add, FORGE_CALL_C, 0, FORGE_LINKAGE_EXTERNAL, FORGE_VISIBILITY_HIDDEN))
+        return fail("failed to configure function ABI");
 
     // Create another function after the first handles to prove index-backed handles survive vector growth.
     auto* caller = forge_function_create(module, "caller", FORGE_TYPE_I64, nullptr, 0);
@@ -67,6 +72,12 @@ int main() {
         std::strstr(source_map.data(), "sample.c") == nullptr)
         return fail("source map omitted frontend metadata");
 
+    const size_t abi_required = forge_module_function_abi_json(module, "add", FORGE_ABI_SYSTEM_V_X86_64, nullptr, 0);
+    if (abi_required < 2) return fail("function ABI JSON unavailable");
+    std::vector<char> abi_json(abi_required);
+    forge_module_function_abi_json(module, "add", FORGE_ABI_SYSTEM_V_X86_64, abi_json.data(), abi_json.size());
+    if (std::strstr(abi_json.data(), "integerRegisters") == nullptr)
+        return fail("function ABI JSON missing register counts");
     const size_t semantic_required = forge_module_semantic_fingerprint(module, nullptr, 0);
     const size_t frontend_required = forge_module_frontend_fingerprint(module, nullptr, 0);
     if (semantic_required != 65 || frontend_required != 65) return fail("fingerprint size mismatch");
@@ -148,6 +159,6 @@ int main() {
     forge_function_destroy(add);
     forge_module_destroy(module);
     forge_context_destroy(context);
-    std::cout << "C frontend API v8 parallel-build test passed\n";
+    std::cout << "C frontend API v10 ABI test passed\n";
     return 0;
 }

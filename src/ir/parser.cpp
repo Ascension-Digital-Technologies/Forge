@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/parser.hpp"
 #include "forge/ir/lexer.hpp"
 #include "forge/target/data_layout.hpp"
@@ -21,8 +24,8 @@ public:
             while (!at("}") && !ended()) {
                 if (at("struct") || (at("moveonly") && peek(1).text == "struct")) module.structs().push_back(parse_struct());
                 else if (at("array") || (at("moveonly") && peek(1).text == "array")) module.arrays().push_back(parse_array());
-                else if (at("global") || at("constant") || (at("extern") && (peek(1).text == "global" || peek(1).text == "constant"))) module.globals().push_back(parse_global(module));
-                else module.functions().push_back(parse_function(at("signature")));
+                else if (is_global_start()) module.globals().push_back(parse_global(module));
+                else module.functions().push_back(parse_function());
             }
             expect("}");
         } catch (const std::runtime_error&) {}
@@ -35,6 +38,14 @@ private:
     bool ended() const { return peek().kind==TokenKind::end; }
     bool at(std::string_view text) const { return peek().text==text; }
     bool take(std::string_view text) { if (at(text)) { ++pos_; return true; } return false; }
+    bool is_symbol_prefix(std::string_view text) const {
+        return text == "extern" || text == "internal" || text == "weak" || text == "hidden";
+    }
+    bool is_global_start() const {
+        std::size_t lookahead = 0;
+        while (is_symbol_prefix(peek(lookahead).text)) ++lookahead;
+        return peek(lookahead).text == "global" || peek(lookahead).text == "constant";
+    }
     Token expect(std::string_view text) { if (!take(text)) fail("expected '"+std::string(text)+"'"); return tokens_[pos_-1]; }
     Token expect_kind(TokenKind kind, std::string_view what) { if (peek().kind!=kind) fail("expected "+std::string(what)); return tokens_[pos_++]; }
     [[noreturn]] void fail(std::string message) { diagnostics_.push_back({DiagnosticSeverity::error,std::move(message),peek().range}); throw std::runtime_error("parse"); }
@@ -252,7 +263,14 @@ private:
     }
     Global parse_global(const Module& module) {
         Global global;
-        global.is_external = take("extern");
+        bool parsing_prefixes = true;
+        while (parsing_prefixes) {
+            if (take("extern")) global.is_external = true;
+            else if (take("internal")) global.linkage = SymbolLinkage::internal;
+            else if (take("weak")) global.linkage = SymbolLinkage::weak;
+            else if (take("hidden")) global.visibility = SymbolVisibility::hidden;
+            else parsing_prefixes = false;
+        }
         global.is_constant = take("constant");
         if (!global.is_constant) expect("global");
         global.name = strip(expect_kind(TokenKind::symbol, "global name").text);
@@ -296,11 +314,27 @@ private:
         }
         return global;
     }
-    Function parse_function(bool signature = false) {
-        const bool external = !signature && take("extern");
-        if (signature) expect("signature"); else expect("func");
-        Function fn; fn.is_external = external; fn.is_signature = signature; fn.name=strip(expect_kind(TokenKind::symbol, signature ? "signature name" : "function name").text);
-        fn.parameters=parse_parameters(); expect("->");
+    Function parse_function() {
+        Function fn;
+        bool signature = false;
+        bool parsing_prefixes = true;
+        while (parsing_prefixes) {
+            if (take("extern")) fn.is_external = true;
+            else if (take("signature")) { fn.is_signature = true; signature = true; }
+            else if (take("variadic")) fn.variadic = true;
+            else if (take("internal")) fn.linkage = SymbolLinkage::internal;
+            else if (take("weak")) fn.linkage = SymbolLinkage::weak;
+            else if (take("hidden")) fn.visibility = SymbolVisibility::hidden;
+            else if (take("c")) fn.calling_convention = CallingConvention::c;
+            else if (take("systemv")) fn.calling_convention = CallingConvention::system_v;
+            else if (take("win64")) fn.calling_convention = CallingConvention::windows_x64;
+            else if (take("fast")) fn.calling_convention = CallingConvention::fast;
+            else parsing_prefixes = false;
+        }
+        if (!signature) expect("func");
+        fn.name = strip(expect_kind(TokenKind::symbol, signature ? "signature name" : "function name").text);
+        fn.parameters = parse_parameters();
+        expect("->");
         if (take("borrow")) fn.return_borrow_mode = take("mut") ? BorrowMode::mutable_ : BorrowMode::immutable;
         else fn.return_owned = take("owned");
         if (take("struct")) {
@@ -314,15 +348,15 @@ private:
         } else {
             if (fn.return_owned) fail("owned return requires struct or array type");
             if (fn.return_borrow_mode != BorrowMode::none) fail("borrowed return requires struct or array type");
-            fn.return_type=parse_type();
+            fn.return_type = parse_type();
         }
         if (fn.return_borrow_mode != BorrowMode::none) {
             expect("from");
             fn.return_borrow_parameter = static_cast<std::int32_t>(parse_u32_token("borrowed return parameter index"));
         }
-        if (external || signature) { return fn; }
+        if (fn.is_external || signature) return fn;
         expect("{");
-        while (!at("}") && !ended()) { fn.blocks.push_back(parse_block()); }
+        while (!at("}") && !ended()) fn.blocks.push_back(parse_block());
         expect("}");
         return fn;
     }

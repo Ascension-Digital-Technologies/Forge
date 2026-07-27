@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(COMMAND "${FORGE}" compile "${INPUT}" --format=${FORMAT} -o "${OUTPUT1}" RESULT_VARIABLE r1)
 if(NOT r1 EQUAL 0)
   message(FATAL_ERROR "first object emission failed")

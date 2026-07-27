@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 if(NOT DEFINED BUILD_DIR OR NOT DEFINED SOURCE_DIR OR NOT DEFINED CMAKE_COMMAND_PATH)
   message(FATAL_ERROR "BUILD_DIR, SOURCE_DIR, and CMAKE_COMMAND_PATH are required")
 endif()
@@ -82,7 +85,7 @@ if(NOT run_result EQUAL 0)
   message(FATAL_ERROR "Forge consumer failed: ${run_result}")
 endif()
 string(STRIP "${output}" output)
-if(NOT output STREQUAL "1.0.0")
+if(NOT output STREQUAL "2.0.0")
   message(FATAL_ERROR "Unexpected installed Forge version: ${output}")
 endif()
 

@@ -37,3 +37,14 @@ The repository includes `.clang-format` and `.editorconfig`. Keep generated file
 ## Reporting bugs
 
 Include the Forge version, platform/toolchain, smallest reproducer, expected behavior, observed behavior, and relevant diagnostics.
+
+## Source license headers
+
+Every maintained source, header, build script, test source, and example source must begin with the project license notice:
+
+```text
+Copyright 2026 Mario Vinciguerra
+SPDX-License-Identifier: Apache-2.0
+```
+
+Use the comment syntax appropriate for the file type and preserve a shebang as the first line of executable scripts. The repository hygiene test enforces this requirement.

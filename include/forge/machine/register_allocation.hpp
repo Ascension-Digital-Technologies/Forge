@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #include <cstdint>
@@ -46,6 +49,11 @@ struct AllocationLocation {
     std::int64_t rematerialized_immediate{};
 };
 
+struct LiveSegment {
+    std::uint32_t start{};
+    std::uint32_t end{};
+};
+
 struct LiveInterval {
     VirtualRegister virtual_register{};
     std::uint32_t start{};
@@ -54,6 +62,18 @@ struct LiveInterval {
     std::uint32_t spill_weight{};
     std::uint32_t loop_depth{};
     std::uint32_t call_crossing_count{};
+    std::vector<LiveSegment> segments;
+};
+
+struct LiveRangeSplitStats {
+    std::uint32_t split_values{};
+    std::uint32_t transition_stores{};
+    std::uint32_t transition_loads{};
+    std::uint32_t transition_bytes{};
+    std::uint32_t cross_block_split_values{};
+    std::uint32_t critical_edge_split_values{};
+    std::uint32_t critical_edge_blocks{};
+    std::uint32_t merge_parameters{};
 };
 
 struct RegisterAllocation {
@@ -67,6 +87,8 @@ struct RegisterAllocation {
     std::uint32_t frame_size_before_slot_reuse{};
     std::uint32_t frame_bytes_saved{};
     std::uint32_t coalesced_copy_count{};
+    std::uint32_t global_copy_affinity_count{};
+    std::uint32_t copy_spills_recovered{};
     std::uint32_t two_address_reuse_count{};
     std::uint32_t unary_reuse_count{};
     std::uint32_t rematerialized_value_count{};
@@ -78,6 +100,10 @@ struct RegisterAllocation {
     std::uint32_t callee_saved_allocation_count{};
     std::uint32_t weighted_spill_decision_count{};
     std::uint32_t copy_hint_count{};
+    std::uint32_t segmented_interval_count{};
+    std::uint32_t live_range_hole_count{};
+    std::uint32_t interference_edge_count{};
+    std::uint32_t hole_aware_register_reuse_count{};
     Diagnostics diagnostics;
 
     [[nodiscard]] bool ok() const noexcept { return diagnostics.empty(); }
@@ -93,6 +119,7 @@ struct StackAllocation {
     [[nodiscard]] std::int32_t offset(VirtualRegister reg) const { return offsets.at(reg); }
 };
 
+[[nodiscard]] LiveRangeSplitStats split_live_ranges_around_calls(Function& function);
 [[nodiscard]] std::vector<LiveInterval> compute_live_intervals(const Function& function);
 [[nodiscard]] RegisterAllocation allocate_linear_scan(const Function& function);
 [[nodiscard]] StackAllocation allocate_stack_slots(const Function& function);

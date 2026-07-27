@@ -47,7 +47,7 @@ The builder manages insertion points, unique SSA names, source spans, duplicate 
 Include `<forge-c/forge.h>`. The API uses opaque, stable handles and explicit destroy functions.
 
 ```c
-#if FORGE_C_API_VERSION != 9
+#if FORGE_C_API_VERSION != 10
 #error "Unsupported Forge C API"
 #endif
 ```

@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/printer.hpp"
 #include <sstream>
 #include <cctype>
@@ -38,6 +41,20 @@ void print_bytes(std::ostringstream& out, const std::vector<std::uint8_t>& bytes
     }
     out << '"';
 }
+void print_symbol_prefix(std::ostringstream& out, SymbolLinkage linkage, SymbolVisibility visibility) {
+    if (linkage == SymbolLinkage::internal) out << "internal ";
+    else if (linkage == SymbolLinkage::weak) out << "weak ";
+    if (visibility == SymbolVisibility::hidden) out << "hidden ";
+}
+void print_calling_convention(std::ostringstream& out, CallingConvention convention) {
+    switch (convention) {
+    case CallingConvention::platform: break;
+    case CallingConvention::c: out << "c "; break;
+    case CallingConvention::system_v: out << "systemv "; break;
+    case CallingConvention::windows_x64: out << "win64 "; break;
+    case CallingConvention::fast: out << "fast "; break;
+    }
+}
 void print_return_type(std::ostringstream& out, const Function& function) {
     if (function.return_borrow_mode == BorrowMode::immutable) out << "borrow ";
     else if (function.return_borrow_mode == BorrowMode::mutable_) out << "borrow mut ";
@@ -76,8 +93,10 @@ std::string print_module(const Module& module) {
     for (const auto& array : module.arrays()) out << "  " << (array.move_only ? "moveonly " : "") << "array @" << array.name << " = " << array.element_type.str() << "[" << array.element_count << "]\n";
     if ((!module.structs().empty() || !module.arrays().empty()) && (!module.globals().empty() || !module.functions().empty())) out << "\n";
     for (const auto& global : module.globals()) {
-        out << "  " << (global.is_external ? "extern " : "")
-            << (global.is_constant ? "constant" : "global") << " @" << global.name
+        out << "  ";
+        if (global.is_external) out << "extern ";
+        print_symbol_prefix(out, global.linkage, global.visibility);
+        out << (global.is_constant ? "constant" : "global") << " @" << global.name
             << ": ";
         if (!global.function_signature_name.empty()) { out << "callback @" << global.function_signature_name; if (global.element_count != 1) out << '[' << global.element_count << ']'; }
         else if (global.aggregate_kind == AggregateRefKind::structure) out << "struct @" << global.aggregate_name;
@@ -93,7 +112,20 @@ std::string print_module(const Module& module) {
         out << "\n";
     }
     if (!module.globals().empty() && !module.functions().empty()) out << "\n";
-    for(const auto& fn:module.functions()) { if(fn.is_signature){ out<<"  signature @"<<fn.name; print_params(out,fn.parameters); out<<" -> "; print_return_type(out, fn); out<<"\n"; continue; } if(fn.is_external){ out<<"  extern func @"<<fn.name; print_params(out,fn.parameters); out<<" -> "; print_return_type(out, fn); out<<"\n"; continue; } out<<"  func @"<<fn.name; print_params(out,fn.parameters); out<<" -> "; print_return_type(out, fn); out<<" {\n";
+    for(const auto& fn:module.functions()) {
+        out << "  ";
+        if (fn.is_external) out << "extern ";
+        if (fn.is_signature) out << "signature ";
+        if (fn.variadic) out << "variadic ";
+        print_symbol_prefix(out, fn.linkage, fn.visibility);
+        print_calling_convention(out, fn.calling_convention);
+        if (!fn.is_signature) out << "func ";
+        out << "@" << fn.name;
+        print_params(out, fn.parameters);
+        out << " -> ";
+        print_return_type(out, fn);
+        if (fn.is_signature || fn.is_external) { out << "\n"; continue; }
+        out << " {\n";
         for(const auto& block:fn.blocks) { out<<"  "<<block.name; if(!block.parameters.empty()) print_params(out,block.parameters); out<<":\n";
             for(const auto& op:block.operations) { out<<"    "; if(!op.result.empty())out<<op.result<<" = "; out<<op.opcode;
                 if(op.opcode=="jump") { out<<' '<<op.successors[0]; print_args(out,op.successor_arguments[0]); }

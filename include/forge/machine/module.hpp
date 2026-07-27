@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #include <cstdint>
@@ -130,6 +133,7 @@ enum class Opcode : std::uint8_t {
     call_f32,
     call_f64,
     call_void,
+    call_aggregate,
     call_indirect_i32,
     call_indirect_i64,
     call_indirect_f32,
@@ -142,6 +146,7 @@ enum class Opcode : std::uint8_t {
     return_f32,
     return_f64,
     return_void,
+    return_aggregate,
 };
 
 struct Successor {

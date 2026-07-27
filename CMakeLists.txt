@@ -1,6 +1,9 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 cmake_minimum_required(VERSION 3.21)
 project(Forge
- VERSION 1.0.0
+ VERSION 2.0.0
  DESCRIPTION "Verified deterministic compiler core and x86-64 backend"
  LANGUAGES CXX)
 option(FORGE_BUILD_TESTS "Build Forge tests" ON)
@@ -41,11 +44,12 @@ if(FORGE_ENABLE_ASAN OR FORGE_ENABLE_UBSAN)
 endif()
 add_library(forge
  src/diagnostics/format.cpp
+ src/frontend/source_manager.cpp src/frontend/diagnostic_engine.cpp src/frontend/symbol_table.cpp src/frontend/semantic_context.cpp src/frontend/control_flow.cpp
  src/ir/context.cpp src/ir/module.cpp src/ir/builder.cpp src/ir/source_map.cpp src/ir/incremental.cpp src/ir/artifact_cache.cpp src/ir/build_driver.cpp
   src/ir/dependency_build.cpp src/capi/forge.cpp src/ir/lexer.cpp src/ir/parser.cpp src/ir/printer.cpp src/ir/verifier.cpp src/ir/binary.cpp
  src/analysis/function_analysis.cpp src/pass/pass.cpp src/pass/pipeline.cpp src/transforms/scalar.cpp
  src/machine/module.cpp src/machine/lower.cpp src/machine/liveness.cpp src/machine/optimize.cpp src/machine/register_allocation.cpp src/machine/verifier.cpp src/codegen/x86_64/encoder.cpp
- src/jit/engine.cpp src/jit/invoke.cpp src/object/elf.cpp src/object/coff.cpp src/object/incremental.cpp src/object/native_link.cpp src/interpreter/interpreter.cpp src/runtime/bindings.cpp src/target/data_layout.cpp)
+ src/jit/engine.cpp src/jit/invoke.cpp src/object/elf.cpp src/object/coff.cpp src/object/archive.cpp src/object/incremental.cpp src/object/native_link.cpp src/interpreter/interpreter.cpp src/runtime/bindings.cpp src/target/data_layout.cpp src/target/abi.cpp)
 add_library(Forge::forge ALIAS forge)
 set_target_properties(forge PROPERTIES
  VERSION ${PROJECT_VERSION}
@@ -102,7 +106,9 @@ if(FORGE_BUILD_TESTS)
  endfunction()
  forge_add_test(forge-diagnostic-tests tests/diagnostics/diagnostic_tests.cpp)
  forge_add_test(forge-ir-tests tests/ir/ir_tests.cpp)
+ forge_add_test(forge-signature-metadata-tests tests/ir/signature_metadata_tests.cpp)
  forge_add_test(forge-builder-tests tests/frontend/builder_tests.cpp)
+ forge_add_test(forge-frontend-kit-tests tests/frontend/frontend_kit_tests.cpp)
  add_executable(forge-minilang-example
   examples/frontend/minilang/src/main.cpp
   examples/frontend/minilang/src/lexer.cpp
@@ -128,8 +134,10 @@ forge_add_test(forge-dependency-build-tests tests/frontend/dependency_build_test
  forge_add_test(forge-jit-invoke-tests tests/jit/invoke_tests.cpp)
  forge_add_test(forge-runtime-binding-tests tests/runtime/binding_tests.cpp)
  forge_add_test(forge-data-layout-tests tests/target/data_layout_tests.cpp)
+ forge_add_test(forge-abi-classification-tests tests/target/abi_classification_tests.cpp)
  forge_add_test(forge-object-tests tests/object/elf_tests.cpp)
  forge_add_test(forge-coff-object-tests tests/object/coff_tests.cpp)
+ forge_add_test(forge-archive-tests tests/object/archive_tests.cpp)
 forge_add_test(forge-incremental-object-tests tests/object/incremental_object_tests.cpp)
  forge_add_test(forge-native-incremental-link-tests tests/object/native_incremental_link_tests.cpp)
  add_test(NAME forge-elf-deterministic-output COMMAND ${CMAKE_COMMAND}
@@ -164,6 +172,22 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
   -DPARENT_CONFIG=$<CONFIG>
   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package/check_install_consumer.cmake)
  if(UNIX AND NOT APPLE)
+  add_test(NAME forge-static-library-workflow COMMAND ${CMAKE_COMMAND}
+   -DFORGE=$<TARGET_FILE:forge-cli> -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/library-answer.fir
+   -DOBJECT=${CMAKE_CURRENT_BINARY_DIR}/forge-static-library.o
+   -DARCHIVE=${CMAKE_CURRENT_BINARY_DIR}/libforge-answer.a
+   -DSOURCE=${CMAKE_CURRENT_BINARY_DIR}/forge-static-consumer.cpp
+   -DEXECUTABLE=${CMAKE_CURRENT_BINARY_DIR}/forge-static-consumer
+   -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/object/check_static_library.cmake)
+  add_test(NAME forge-shared-library-workflow COMMAND ${CMAKE_COMMAND}
+   -DFORGE=$<TARGET_FILE:forge-cli> -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/library-answer.fir
+   -DOBJECT=${CMAKE_CURRENT_BINARY_DIR}/forge-shared-library.o
+   -DLIBRARY=${CMAKE_CURRENT_BINARY_DIR}/libforge-answer.so
+   -DSOURCE=${CMAKE_CURRENT_BINARY_DIR}/forge-shared-consumer.cpp
+   -DEXECUTABLE=${CMAKE_CURRENT_BINARY_DIR}/forge-shared-consumer
+   -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/object/check_shared_library.cmake)
   add_test(NAME forge-native-link-workflow COMMAND ${CMAKE_COMMAND}
    -DFORGE=$<TARGET_FILE:forge-cli> -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/link.fir
    -DOBJECT=${CMAKE_CURRENT_BINARY_DIR}/forge-link-test.o -DEXECUTABLE=${CMAKE_CURRENT_BINARY_DIR}/forge-link-test
@@ -279,7 +303,13 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
  add_test(NAME forge-driver-compile-coff COMMAND forge-cli compile ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir --format=coff -o ${CMAKE_CURRENT_BINARY_DIR}/forge-driver-test.obj)
  set_tests_properties(forge-driver-compile-coff PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted COFF AMD64 object")
  add_test(NAME forge-driver-version COMMAND forge-cli version)
- set_tests_properties(forge-driver-version PROPERTIES PASS_REGULAR_EXPRESSION "forge 1.0.0")
+ set_tests_properties(forge-driver-version PROPERTIES PASS_REGULAR_EXPRESSION "forge 2.0.0")
+ add_test(NAME forge-driver-doctor COMMAND forge-cli doctor)
+ set_tests_properties(forge-driver-doctor PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  doctor passed")
+ add_test(NAME forge-driver-inspect COMMAND forge-cli inspect ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir --stage=all)
+ set_tests_properties(forge-driver-inspect PROPERTIES PASS_REGULAR_EXPRESSION "=== MACHINE IR ===")
+ add_test(NAME forge-driver-explain COMMAND forge-cli explain ${CMAKE_CURRENT_SOURCE_DIR}/examples/optimization.fir -O2)
+ set_tests_properties(forge-driver-explain PROPERTIES PASS_REGULAR_EXPRESSION "TOTAL  rewritten=")
  add_test(NAME forge-driver-verify COMMAND forge-cli verify ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir)
  set_tests_properties(forge-driver-verify PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  verified")
  add_test(NAME forge-driver-source-diagnostic COMMAND ${CMAKE_COMMAND}
@@ -308,7 +338,10 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
   add_test(NAME forge-run-eight-argument-cli
    COMMAND forge-run --engine=compare ${CMAKE_CURRENT_SOURCE_DIR}/examples/abi.fir sum_eight 1 2 3 4 5 6 7 8)
   set_tests_properties(forge-run-eight-argument-cli PROPERTIES PASS_REGULAR_EXPRESSION "36")
+  set_tests_properties(forge-run-jit-cli forge-run-compare-cli forge-run-constant-store forge-run-immediate-control-low forge-run-immediate-control-high forge-run-eight-argument-cli PROPERTIES LABELS "jit-runtime")
  endif()
+ set_tests_properties(forge-jit-invoke-tests forge-runtime-binding-tests forge-differential-tests PROPERTIES LABELS "jit-runtime")
+ set_tests_properties(forge-install-consumer-release-gate PROPERTIES LABELS "installed-consumer")
 endif()
 if(FORGE_BUILD_FUZZERS)
  forge_add_test(forge-parser-fuzz-smoke tests/fuzz/parser_fuzz_smoke.cpp)

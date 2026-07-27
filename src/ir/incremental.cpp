@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/incremental.hpp"
 #include "forge/ir/printer.hpp"
 #include <algorithm>

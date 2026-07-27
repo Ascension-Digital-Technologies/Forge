@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(
  COMMAND "${FORGE_CODEGEN}" "${INPUT}" --stats
  RESULT_VARIABLE result

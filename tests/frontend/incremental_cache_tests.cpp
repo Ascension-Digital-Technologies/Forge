@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/artifact_cache.hpp"
 #include "forge/ir/builder.hpp"
 #include <array>

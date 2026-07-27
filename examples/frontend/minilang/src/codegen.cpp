@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "minilang/codegen.hpp"
 #include <forge/ir/builder.hpp>
 #include <forge/ir/opcode.hpp>

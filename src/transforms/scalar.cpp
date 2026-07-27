@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/transforms/scalar.hpp"
 
 #include <algorithm>
@@ -172,6 +175,131 @@ pass::PassResult BranchFoldPass::run(ir::Function& function,
         terminator.successor_arguments = {terminator.successor_arguments[selected]};
         result.changed = true;
         ++result.operations_rewritten;
+    }
+    return result;
+}
+
+
+pass::PassResult MemoryForwardingPass::run(ir::Function& function,
+                                            analysis::FunctionAnalysisManager& analyses) {
+    struct AvailableMemoryValue {
+        analysis::MemoryLocation location;
+        ir::Type type;
+        std::string value;
+    };
+    pass::PassResult result;
+    const auto& aliases = analyses.aliases();
+    const auto size_of = [](ir::Type type) -> std::uint32_t {
+        switch (type.kind()) {
+        case ir::TypeKind::i1: case ir::TypeKind::i8: return 1U;
+        case ir::TypeKind::i16: return 2U;
+        case ir::TypeKind::i32: case ir::TypeKind::f32: return 4U;
+        case ir::TypeKind::i64: case ir::TypeKind::f64: case ir::TypeKind::ptr: return 8U;
+        case ir::TypeKind::void_: return 0U;
+        }
+        return 0U;
+    };
+
+    for (auto& block : function.blocks) {
+        std::vector<AvailableMemoryValue> available;
+        for (auto& operation : block.operations) {
+            if (operation.opcode == "load" && operation.operands.size() == 1U && !operation.result.empty()) {
+                const auto location = aliases.location(operation.operands.front(), size_of(operation.type));
+                const auto match = std::find_if(available.rbegin(), available.rend(), [&](const AvailableMemoryValue& item) {
+                    return item.type == operation.type && aliases.alias(item.location, location) == analysis::AliasResult::must_alias;
+                });
+                if (match != available.rend()) {
+                    operation.opcode = "copy";
+                    operation.operands = {match->value};
+                    operation.alignment = 0;
+                    ++result.operations_rewritten;
+                    result.changed = true;
+                } else {
+                    available.push_back({location, operation.type, operation.result});
+                }
+                continue;
+            }
+            if (operation.opcode == "store" && operation.operands.size() == 2U) {
+                const auto location = aliases.location(operation.operands[1], size_of(operation.type));
+                available.erase(std::remove_if(available.begin(), available.end(), [&](const AvailableMemoryValue& item) {
+                    return aliases.alias(item.location, location) != analysis::AliasResult::no_alias;
+                }), available.end());
+                available.push_back({location, operation.type, operation.operands.front()});
+                continue;
+            }
+            if (operation.opcode == "call" || operation.opcode == "call.indirect" ||
+                operation.opcode == "memory.copy" || operation.opcode == "memory.set" ||
+                operation.opcode.starts_with("aggregate.")) {
+                available.clear();
+            }
+        }
+    }
+    return result;
+}
+
+pass::PassResult LoopInvariantCodeMotionPass::run(ir::Function& function,
+                                                   analysis::FunctionAnalysisManager& analyses) {
+    pass::PassResult result;
+    const auto loop_info = analyses.loops();
+    if (loop_info.loops.empty()) return result;
+
+    const auto is_hoistable = [](const ir::Operation& operation) {
+        static const std::unordered_set<std::string> pure_nontrapping{
+            "const", "copy", "add", "sub", "mul", "and", "or", "xor", "shl",
+            "shr.signed", "shr.unsigned", "neg", "not", "cmp.eq", "cmp.ne", "cmp.lt",
+            "cmp.le", "cmp.gt", "cmp.ge", "cmp.ult", "cmp.ule", "cmp.ugt", "cmp.uge",
+            "truncate", "zero_extend", "sign_extend", "bitcast", "func.address", "global.address",
+            "callback.address", "ptr.offset", "field.address"};
+        return !operation.result.empty() && pure_nontrapping.contains(operation.opcode);
+    };
+
+    for (const auto& loop : loop_info.loops) {
+        if (loop.preheader.empty()) continue;
+        const auto header_it = std::find_if(function.blocks.begin(), function.blocks.end(),
+            [&](const ir::Block& block) { return block.name == loop.header; });
+        const auto preheader_it = std::find_if(function.blocks.begin(), function.blocks.end(),
+            [&](const ir::Block& block) { return block.name == loop.preheader; });
+        if (header_it == function.blocks.end() || preheader_it == function.blocks.end() || preheader_it->operations.empty()) continue;
+        auto& header = *header_it;
+        auto& preheader = *preheader_it;
+        if (preheader.operations.back().opcode != "jump" || preheader.operations.back().successors.size() != 1U ||
+            preheader.operations.back().successors.front() != header.name) continue;
+
+        std::unordered_set<std::string> loop_definitions;
+        for (const auto& block : function.blocks) {
+            if (!loop.blocks.contains(block.name)) continue;
+            for (const auto& parameter : block.parameters) loop_definitions.insert(parameter.name);
+            for (const auto& operation : block.operations)
+                if (!operation.result.empty()) loop_definitions.insert(operation.result);
+        }
+        std::unordered_set<std::string> invariant;
+        std::vector<ir::Operation> hoisted;
+        std::vector<ir::Operation> retained;
+        retained.reserve(header.operations.size());
+        for (auto& operation : header.operations) {
+            bool operands_invariant = true;
+            for (const auto& operand : operation.operands) {
+                if (!operand.starts_with('%')) continue;
+                if (loop_definitions.contains(operand) && !invariant.contains(operand)) {
+                    operands_invariant = false;
+                    break;
+                }
+            }
+            if (is_hoistable(operation) && operands_invariant) {
+                invariant.insert(operation.result);
+                hoisted.push_back(std::move(operation));
+            } else {
+                retained.push_back(std::move(operation));
+            }
+        }
+        if (hoisted.empty()) continue;
+        header.operations = std::move(retained);
+        auto insertion = preheader.operations.end() - 1;
+        preheader.operations.insert(insertion,
+                                    std::make_move_iterator(hoisted.begin()),
+                                    std::make_move_iterator(hoisted.end()));
+        result.changed = true;
+        result.operations_rewritten += hoisted.size();
     }
     return result;
 }

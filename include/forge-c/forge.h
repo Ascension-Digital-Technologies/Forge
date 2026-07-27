@@ -1,7 +1,10 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #ifndef FORGE_C_FORGE_H
 #define FORGE_C_FORGE_H
 
-#define FORGE_C_API_VERSION 9
+#define FORGE_C_API_VERSION 10
 
 #include <stddef.h>
 #include <stdint.h>
@@ -20,6 +23,31 @@ typedef enum forge_type_kind {
     FORGE_TYPE_VOID, FORGE_TYPE_I1, FORGE_TYPE_I8, FORGE_TYPE_I16, FORGE_TYPE_I32,
     FORGE_TYPE_I64, FORGE_TYPE_F32, FORGE_TYPE_F64, FORGE_TYPE_PTR
 } forge_type_kind_t;
+
+
+typedef enum forge_calling_convention {
+    FORGE_CALL_PLATFORM,
+    FORGE_CALL_C,
+    FORGE_CALL_SYSTEM_V,
+    FORGE_CALL_WINDOWS_X64,
+    FORGE_CALL_FAST
+} forge_calling_convention_t;
+
+typedef enum forge_symbol_linkage {
+    FORGE_LINKAGE_EXTERNAL,
+    FORGE_LINKAGE_INTERNAL,
+    FORGE_LINKAGE_WEAK
+} forge_symbol_linkage_t;
+
+typedef enum forge_symbol_visibility {
+    FORGE_VISIBILITY_DEFAULT,
+    FORGE_VISIBILITY_HIDDEN
+} forge_symbol_visibility_t;
+
+typedef enum forge_native_abi {
+    FORGE_ABI_SYSTEM_V_X86_64,
+    FORGE_ABI_WINDOWS_X64
+} forge_native_abi_t;
 
 typedef enum forge_diagnostic_severity {
     FORGE_DIAGNOSTIC_NOTE,
@@ -47,6 +75,11 @@ forge_function_t* forge_function_create(forge_module_t* module, const char* name
                                         const forge_type_kind_t* parameter_types,
                                         size_t parameter_count);
 void forge_function_destroy(forge_function_t* function);
+int forge_function_set_abi(forge_function_t* function,
+                           forge_calling_convention_t calling_convention,
+                           int variadic,
+                           forge_symbol_linkage_t linkage,
+                           forge_symbol_visibility_t visibility);
 forge_block_t* forge_block_create(forge_function_t* function, const char* name);
 forge_block_t* forge_block_create_with_parameters(forge_function_t* function, const char* name,
                                                    const forge_type_kind_t* parameter_types,
@@ -118,6 +151,10 @@ size_t forge_module_parallel_build_schedule_json(const forge_module_t* previous_
                                                 const char* configuration,
                                                 size_t requested_workers,
                                                 char* output, size_t output_capacity);
+size_t forge_module_function_abi_json(const forge_module_t* module,
+                                      const char* function_name,
+                                      forge_native_abi_t abi,
+                                      char* output, size_t output_capacity);
 size_t forge_module_dependency_build_schedule_json(const forge_module_t* previous_module,
                                                   const forge_module_t* current_module,
                                                   const char* frontend_id,

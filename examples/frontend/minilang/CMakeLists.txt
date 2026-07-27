@@ -1,7 +1,10 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 cmake_minimum_required(VERSION 3.21)
 project(ForgeMiniLang LANGUAGES CXX)
 
-find_package(Forge 1.0 CONFIG REQUIRED)
+find_package(Forge 2.0 CONFIG REQUIRED)
 
 add_executable(minilang
     src/main.cpp

@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/pass/pipeline.hpp"
 
 #include "forge/transforms/scalar.hpp"
@@ -33,6 +36,7 @@ void build_standard_pipeline(PassManager& pipeline, OptimizationLevel level) {
             .add<transforms::DeadCodeEliminationPass>();
     if (level == OptimizationLevel::o1) return;
     pipeline.add<transforms::CommonSubexpressionEliminationPass>()
+            .add<transforms::MemoryForwardingPass>()
             .add<transforms::CopyPropagationPass>()
             .add<transforms::DeadCodeEliminationPass>()
             .add<transforms::SimplifyCFGPass>();
@@ -50,7 +54,9 @@ void build_standard_pipeline(PassManager& pipeline, OptimizationLevel level) {
     }
     if (level == OptimizationLevel::o3) {
         pipeline.add<transforms::SparseConditionalConstantPropagationPass>()
+                .add<transforms::LoopInvariantCodeMotionPass>()
                 .add<transforms::CommonSubexpressionEliminationPass>()
+                .add<transforms::MemoryForwardingPass>()
                 .add<transforms::AlgebraicSimplificationPass>()
                 .add<transforms::CopyPropagationPass>()
                 .add<transforms::DeadCodeEliminationPass>()

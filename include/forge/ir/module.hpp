@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 #include <cstdint>
 #include <string>
@@ -11,6 +14,9 @@ using ValueId = std::uint32_t;
 
 enum class AggregateRefKind : std::uint8_t { scalar, structure, array };
 enum class BorrowMode : std::uint8_t { none, immutable, mutable_ };
+enum class CallingConvention : std::uint8_t { platform, c, system_v, windows_x64, fast };
+enum class SymbolLinkage : std::uint8_t { external, internal, weak };
+enum class SymbolVisibility : std::uint8_t { default_, hidden };
 
 struct ValueDecl {
     std::string name;
@@ -52,6 +58,8 @@ struct Global {
     std::string function_signature_name;
     bool is_constant{};
     bool is_external{};
+    SymbolLinkage linkage{SymbolLinkage::external};
+    SymbolVisibility visibility{SymbolVisibility::default_};
     std::string initializer;
     std::uint32_t element_count{1};
     std::uint32_t alignment{};
@@ -100,6 +108,10 @@ struct Function {
     std::string name;
     bool is_external{};
     bool is_signature{};
+    bool variadic{};
+    CallingConvention calling_convention{CallingConvention::platform};
+    SymbolLinkage linkage{SymbolLinkage::external};
+    SymbolVisibility visibility{SymbolVisibility::default_};
     Type return_type;
     AggregateRefKind return_aggregate_kind{AggregateRefKind::scalar};
     std::string return_aggregate_name;

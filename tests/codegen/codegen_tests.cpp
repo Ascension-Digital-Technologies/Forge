@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/codegen/x86_64/encoder.hpp"
 #include "forge/jit/engine.hpp"
 
@@ -293,6 +296,252 @@ entry:
                 "call-crossing value was not assigned to a callee-saved register");
         require(call_aware_allocation.callee_saved_allocation_count >= 1,
                 "allocator did not report its callee-saved allocation");
+
+        // True transition-based splitting: five values remain live across one
+        // call, but the ABI has only two callee-saved allocation registers.
+        // Forge must spill the excess values immediately before the call,
+        // reload them into new virtual registers afterward, and allocate the
+        // pre/post-call pieces independently.
+        forge::machine::Function transition_split;
+        transition_split.name = "transition_split";
+        transition_split.argument_count = 5;
+        transition_split.argument_widths.assign(5, 8);
+        transition_split.argument_classes.assign(5, forge::machine::RegisterClass::integer);
+        transition_split.register_count = 10;
+        transition_split.register_widths.assign(10, 8);
+        transition_split.register_classes.assign(10, forge::machine::RegisterClass::integer);
+        forge::machine::Block transition_entry;
+        transition_entry.name = "entry";
+        for (forge::machine::VirtualRegister reg = 0; reg < 5; ++reg) {
+            auto argument = make_float_instruction(forge::machine::Opcode::load_argument_i64, reg, {});
+            argument.argument_index = reg;
+            transition_entry.instructions.push_back(std::move(argument));
+        }
+        auto transition_call = make_float_instruction(forge::machine::Opcode::call_i64, 5, {});
+        transition_call.symbol = "external_value";
+        transition_entry.instructions.push_back(std::move(transition_call));
+        transition_entry.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 6, {0, 1}));
+        transition_entry.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 7, {2, 3}));
+        transition_entry.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 8, {6, 7}));
+        transition_entry.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 9, {8, 4}));
+        transition_entry.instructions.push_back(make_float_instruction(forge::machine::Opcode::return_i64, 0, {9}));
+        transition_split.blocks.push_back(std::move(transition_entry));
+
+        const auto split_stats = forge::machine::split_live_ranges_around_calls(transition_split);
+        require(split_stats.split_values == 3, "allocator did not split excess call-crossing values");
+        require(split_stats.transition_stores == 3 && split_stats.transition_loads == 3,
+                "allocator did not insert balanced split transitions");
+        require(transition_split.local_stack_size == 24,
+                "split transition slots were not reserved in the local frame");
+        require(transition_split.register_count == 13,
+                "post-call split segments did not receive new virtual registers");
+        forge::machine::Module transition_module;
+        transition_module.name = "transition_split_module";
+        transition_module.functions.push_back(transition_split);
+        require(forge::machine::verify_module(transition_module).empty(),
+                "transition-split machine function failed verification");
+        const auto transition_allocation = forge::machine::allocate_linear_scan(transition_split);
+        require(transition_allocation.ok(), "transition-split allocation failed");
+        require(transition_allocation.call_crossing_interval_count == 2,
+                "transition splitting did not reduce call-crossing pressure to the callee-saved capacity");
+        std::uint32_t transition_store_count = 0;
+        std::uint32_t transition_load_count = 0;
+        for (const auto& instruction : transition_split.blocks.front().instructions) {
+            transition_store_count += instruction.opcode == forge::machine::Opcode::store_stack_i64 ? 1U : 0U;
+            transition_load_count += instruction.opcode == forge::machine::Opcode::load_stack_i64 ? 1U : 0U;
+        }
+        require(transition_store_count == 3 && transition_load_count == 3,
+                "register-to-stack-to-register transitions are missing from machine IR");
+
+        // Cross-block transition splitting: the call ends one block and the
+        // continuation is a single-predecessor successor. Excess live values
+        // must spill before the call and reload at continuation entry.
+        forge::machine::Function edge_split;
+        edge_split.name = "edge_split";
+        edge_split.argument_count = 5;
+        edge_split.argument_widths.assign(5, 8);
+        edge_split.argument_classes.assign(5, forge::machine::RegisterClass::integer);
+        edge_split.register_count = 10;
+        edge_split.register_widths.assign(10, 8);
+        edge_split.register_classes.assign(10, forge::machine::RegisterClass::integer);
+        forge::machine::Block edge_entry;
+        edge_entry.name = "entry";
+        for (forge::machine::VirtualRegister reg = 0; reg < 5; ++reg) {
+            auto argument = make_float_instruction(forge::machine::Opcode::load_argument_i64, reg, {});
+            argument.argument_index = reg;
+            edge_entry.instructions.push_back(std::move(argument));
+        }
+        auto edge_call = make_float_instruction(forge::machine::Opcode::call_i64, 5, {});
+        edge_call.symbol = "external_value";
+        edge_entry.instructions.push_back(std::move(edge_call));
+        auto edge_jump = make_float_instruction(forge::machine::Opcode::jump, 0, {});
+        edge_jump.successors = {{"continue", {}}};
+        edge_entry.instructions.push_back(std::move(edge_jump));
+        forge::machine::Block edge_continue;
+        edge_continue.name = "continue";
+        edge_continue.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 6, {0, 1}));
+        edge_continue.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 7, {2, 3}));
+        edge_continue.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 8, {6, 7}));
+        edge_continue.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 9, {8, 4}));
+        edge_continue.instructions.push_back(make_float_instruction(forge::machine::Opcode::return_i64, 0, {9}));
+        edge_split.blocks.push_back(std::move(edge_entry));
+        edge_split.blocks.push_back(std::move(edge_continue));
+        const auto edge_stats = forge::machine::split_live_ranges_around_calls(edge_split);
+        require(edge_stats.cross_block_split_values == 3,
+                "allocator did not split excess values across the continuation edge");
+        require(edge_split.blocks.front().instructions.size() >= 5 &&
+                edge_split.blocks[1].instructions.size() >= 8,
+                "cross-block transitions were not inserted at both edge boundaries");
+        forge::machine::Module edge_module;
+        edge_module.name = "edge_split_module";
+        edge_module.functions.push_back(edge_split);
+        require(forge::machine::verify_module(edge_module).empty(),
+                "cross-block transition-split function failed verification");
+
+        // Critical-edge merge repair: one branch crosses a call while another
+        // reaches the same continuation directly. Forge must create an edge
+        // block, reload there, and merge original/reloaded values through block
+        // parameters instead of rewriting the shared continuation unsafely.
+        forge::machine::Function critical_split;
+        critical_split.name = "critical_split";
+        critical_split.argument_count = 6;
+        critical_split.argument_widths = {4, 8, 8, 8, 8, 8};
+        critical_split.argument_classes.assign(6, forge::machine::RegisterClass::integer);
+        critical_split.register_count = 12;
+        critical_split.register_widths.assign(12, 8);
+        critical_split.register_widths[0] = 4;
+        critical_split.register_classes.assign(12, forge::machine::RegisterClass::integer);
+
+        forge::machine::Block critical_entry;
+        critical_entry.name = "entry";
+        for (forge::machine::VirtualRegister reg = 0; reg < 6; ++reg) {
+            auto argument = make_float_instruction(
+                reg == 0 ? forge::machine::Opcode::load_argument : forge::machine::Opcode::load_argument_i64,
+                reg, {});
+            argument.argument_index = reg;
+            critical_entry.instructions.push_back(std::move(argument));
+        }
+        auto critical_branch = make_float_instruction(forge::machine::Opcode::branch_i1, 0, {0});
+        critical_branch.successors = {{"with.call", {}}, {"without.call", {}}};
+        critical_entry.instructions.push_back(std::move(critical_branch));
+
+        forge::machine::Block with_call;
+        with_call.name = "with.call";
+        auto critical_call = make_float_instruction(forge::machine::Opcode::call_i64, 6, {});
+        critical_call.symbol = "external_value";
+        with_call.instructions.push_back(std::move(critical_call));
+        auto with_call_jump = make_float_instruction(forge::machine::Opcode::jump, 0, {});
+        with_call_jump.successors = {{"merge", {}}};
+        with_call.instructions.push_back(std::move(with_call_jump));
+
+        forge::machine::Block without_call;
+        without_call.name = "without.call";
+        auto without_call_jump = make_float_instruction(forge::machine::Opcode::jump, 0, {});
+        without_call_jump.successors = {{"merge", {}}};
+        without_call.instructions.push_back(std::move(without_call_jump));
+
+        forge::machine::Block critical_merge;
+        critical_merge.name = "merge";
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 7, {1, 2}));
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 8, {3, 4}));
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 9, {7, 8}));
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 10, {9, 5}));
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::add_i64, 11, {10, 6}));
+        critical_merge.instructions.push_back(make_float_instruction(forge::machine::Opcode::return_i64, 0, {11}));
+
+        critical_split.blocks.push_back(std::move(critical_entry));
+        critical_split.blocks.push_back(std::move(with_call));
+        critical_split.blocks.push_back(std::move(without_call));
+        critical_split.blocks.push_back(std::move(critical_merge));
+        const auto critical_stats = forge::machine::split_live_ranges_around_calls(critical_split);
+        require(critical_stats.critical_edge_split_values == 3,
+                "critical-edge splitter did not split excess call-crossing values");
+        require(critical_stats.critical_edge_blocks == 1 && critical_stats.merge_parameters == 3,
+                "critical-edge splitter did not create the expected edge block and merge parameters");
+        require(critical_split.blocks.size() == 5 && critical_split.blocks[3].parameters.size() == 3,
+                "critical-edge merge repair did not update the machine CFG");
+        forge::machine::Module critical_module;
+        critical_module.name = "critical_split_module";
+        critical_module.functions.push_back(critical_split);
+        require(forge::machine::verify_module(critical_module).empty(),
+                "critical-edge transition-split function failed verification");
+
+        // Interleave two mutually exclusive CFG arms so their bounding live
+        // intervals overlap even though their real liveness segments do not.
+        // The segmented recovery stage must reuse the same physical registers
+        // instead of spilling the second arm.
+        forge::machine::Function segmented_cfg;
+        segmented_cfg.name = "segmented_cfg";
+        segmented_cfg.argument_count = 1;
+        segmented_cfg.argument_widths = {4};
+        segmented_cfg.argument_classes = {forge::machine::RegisterClass::integer};
+        segmented_cfg.register_count = 18;
+        segmented_cfg.register_widths.assign(18, 8);
+        segmented_cfg.register_widths[0] = 4;
+        segmented_cfg.register_classes.assign(18, forge::machine::RegisterClass::integer);
+
+        forge::machine::Block segmented_entry;
+        segmented_entry.name = "entry";
+        auto segmented_condition = make_float_instruction(forge::machine::Opcode::load_argument, 0, {});
+        segmented_condition.argument_index = 0;
+        segmented_entry.instructions.push_back(std::move(segmented_condition));
+        auto segmented_branch = make_float_instruction(forge::machine::Opcode::branch_i1, 0, {0});
+        segmented_branch.successors = {{"left.def", {}}, {"right.def", {}}};
+        segmented_entry.instructions.push_back(std::move(segmented_branch));
+
+        forge::machine::Block left_def;
+        left_def.name = "left.def";
+        for (forge::machine::VirtualRegister reg = 1; reg <= 4; ++reg)
+            left_def.instructions.push_back(make_float_instruction(
+                forge::machine::Opcode::load_immediate_i64, reg, {}, static_cast<std::int64_t>(reg)));
+        auto left_jump = make_float_instruction(forge::machine::Opcode::jump, 0, {});
+        left_jump.successors = {{"left.use", {}}};
+        left_def.instructions.push_back(std::move(left_jump));
+
+        forge::machine::Block right_def;
+        right_def.name = "right.def";
+        for (forge::machine::VirtualRegister reg = 5; reg <= 8; ++reg)
+            right_def.instructions.push_back(make_float_instruction(
+                forge::machine::Opcode::load_immediate_i64, reg, {}, static_cast<std::int64_t>(reg)));
+        auto right_jump = make_float_instruction(forge::machine::Opcode::jump, 0, {});
+        right_jump.successors = {{"right.use", {}}};
+        right_def.instructions.push_back(std::move(right_jump));
+
+        forge::machine::Block left_use;
+        left_use.name = "left.use";
+        left_use.instructions = {
+            make_float_instruction(forge::machine::Opcode::add_i64, 9, {1, 2}),
+            make_float_instruction(forge::machine::Opcode::add_i64, 10, {3, 4}),
+            make_float_instruction(forge::machine::Opcode::add_i64, 11, {9, 10}),
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {11}),
+        };
+
+        forge::machine::Block right_use;
+        right_use.name = "right.use";
+        right_use.instructions = {
+            make_float_instruction(forge::machine::Opcode::add_i64, 12, {5, 6}),
+            make_float_instruction(forge::machine::Opcode::add_i64, 13, {7, 8}),
+            make_float_instruction(forge::machine::Opcode::add_i64, 14, {12, 13}),
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {14}),
+        };
+
+        // Keep the block order deliberately interleaved.
+        segmented_cfg.blocks = {std::move(segmented_entry), std::move(left_def), std::move(right_def),
+                                std::move(left_use), std::move(right_use)};
+        const auto segmented_allocation = forge::machine::allocate_linear_scan(segmented_cfg);
+        require(segmented_allocation.ok(), "segmented CFG allocation failed");
+        require(segmented_allocation.segmented_interval_count >= 8,
+                "allocator did not record segmented live intervals");
+        require(segmented_allocation.live_range_hole_count >= 8,
+                "allocator did not record CFG live-range holes");
+        require(segmented_allocation.hole_aware_register_reuse_count >= 2,
+                "allocator did not recover registers across mutually exclusive CFG paths");
+        std::uint32_t recovered_right_values = 0;
+        for (forge::machine::VirtualRegister reg = 5; reg <= 8; ++reg)
+            recovered_right_values += segmented_allocation.location(reg).kind ==
+                                      forge::machine::LocationKind::physical_register ? 1U : 0U;
+        require(recovered_right_values >= 2,
+                "mutually exclusive right-arm values did not reuse registers");
 
 
         constexpr auto floating_comparison_source = R"(module @floating_classification {

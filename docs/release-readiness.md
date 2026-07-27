@@ -1,6 +1,6 @@
 # Release readiness
 
-Forge 1.0.0 is the first stable release of the documented compiler-core, frontend SDK, and x86-64 scalar/pointer backend.
+Forge 2.0.0 is a stable release of the documented compiler core, frontend SDK, ABI-classification API, native library workflows, and x86-64 scalar/pointer backend.
 
 ## Required release gates
 
@@ -16,6 +16,7 @@ Forge 1.0.0 is the first stable release of the documented compiler-core, fronten
 - Isolated installed C and C++ package consumers
 - Exact backend code-quality baselines
 - Repository-hygiene checks
+- License-header coverage for maintained source and build files
 
 ## Supported production surface
 
@@ -26,7 +27,7 @@ Forge 1.0.0 is the first stable release of the documented compiler-core, fronten
 - x86-64 JIT on supported hosts
 - System V AMD64 and Windows x64 scalar/pointer calls
 - ELF64 and COFF AMD64 object generation
-- C++ SDK and opaque C API v9
+- C++ SDK and opaque C API v10
 - Incremental fingerprints, dependency planning, native function artifacts, object assembly, and final-binary caching
 - Installed CMake package through `Forge::forge`
 
@@ -39,3 +40,21 @@ Forge 1.0.0 is the first stable release of the documented compiler-core, fronten
 - Architectures other than x86-64
 
 A release must not claim these capabilities until implementation, semantic tests, platform tests, and release gates are complete.
+
+## Forge 1.3 additions
+
+- Alias-analysis and LICM regressions cover disjoint memory, overlapping ranges, natural loops, and interpreter-equivalent transformations.
+- The `-O2` and `-O3` release gates exercise memory forwarding and loop-invariant code motion.
+
+
+- System V AMD64 and Windows x64 aggregate ABI classification
+- Calling-convention, variadic, linkage, and visibility IR metadata
+- Deterministic static archives with native symbol indexes
+- Host-toolchain shared-library linking
+- Native static/shared library link-and-run release gates
+
+ABI classification is production-supported as an analysis API. Full register-classified by-value aggregate machine lowering is not part of the 1.2 support contract.
+
+### Sanitizer boundary
+
+Forge 2.0.0 uses two explicit gates. The strict production matrix runs all 66 tests, including JIT execution and installed C/C++ consumers. The ASan/UBSan core matrix runs 56 sanitizer-safe tests and excludes only dynamic entry into uninstrumented generated code plus separately linked installed-consumer processes. Both matrices pass on the release source.

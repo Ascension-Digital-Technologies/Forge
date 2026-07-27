@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include <cassert>
 #include <string>
 #include "forge/diagnostics/format.hpp"

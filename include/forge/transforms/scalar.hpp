@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #include "forge/pass/pass.hpp"
@@ -31,6 +34,17 @@ public:
 class SparseConditionalConstantPropagationPass final : public pass::FunctionPass {
 public:
     std::string name() const override { return "sccp"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+
+class MemoryForwardingPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "memory-forwarding"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class LoopInvariantCodeMotionPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "licm"; }
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
 };
 class DeadCodeEliminationPass final : public pass::FunctionPass {

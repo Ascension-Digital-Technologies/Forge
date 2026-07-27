@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include <algorithm>
 #include "forge/codegen/x86_64/encoder.hpp"
 
@@ -94,12 +97,20 @@ void emit_ptr_modrm(Buffer& out, std::uint8_t reg, Register pointer, std::int32_
     if (displacement != 0) out.i32(displacement);
 }
 void emit_sse_ptr_load(Buffer& out, XmmRegister destination, Register pointer, bool wide, std::int32_t displacement = 0) {
-    out.byte(wide ? 0xF2 : 0xF3); out.byte(0x0F); out.byte(0x10);
-    emit_ptr_modrm(out, static_cast<std::uint8_t>(destination), pointer, displacement);
+    const auto dst = static_cast<std::uint8_t>(destination);
+    const auto ptr = static_cast<std::uint8_t>(pointer);
+    out.byte(wide ? 0xF2 : 0xF3);
+    if (dst >= 8U || ptr >= 8U) out.byte(static_cast<std::uint8_t>(0x40U | (dst >= 8U ? 0x04U : 0U) | (ptr >= 8U ? 0x01U : 0U)));
+    out.byte(0x0F); out.byte(0x10);
+    emit_ptr_modrm(out, dst, pointer, displacement);
 }
 void emit_sse_ptr_store(Buffer& out, Register pointer, XmmRegister source, bool wide, std::int32_t displacement = 0) {
-    out.byte(wide ? 0xF2 : 0xF3); out.byte(0x0F); out.byte(0x11);
-    emit_ptr_modrm(out, static_cast<std::uint8_t>(source), pointer, displacement);
+    const auto src = static_cast<std::uint8_t>(source);
+    const auto ptr = static_cast<std::uint8_t>(pointer);
+    out.byte(wide ? 0xF2 : 0xF3);
+    if (src >= 8U || ptr >= 8U) out.byte(static_cast<std::uint8_t>(0x40U | (src >= 8U ? 0x04U : 0U) | (ptr >= 8U ? 0x01U : 0U)));
+    out.byte(0x0F); out.byte(0x11);
+    emit_ptr_modrm(out, src, pointer, displacement);
 }
 void emit_sse_xor(Buffer& out, XmmRegister destination, XmmRegister source, bool wide) {
     if (wide) out.byte(0x66);
@@ -753,7 +764,10 @@ void emit_pop_physical(Buffer& out, machine::PhysicalRegister reg) {
     }
 }
 
-EncodedFunction encode_function(const machine::Function& function, Abi abi, Diagnostics& diagnostics) {
+EncodedFunction encode_function(const machine::Function& source_function, Abi abi, Diagnostics& diagnostics) {
+    machine::Function split_function = source_function;
+    const auto split_stats = machine::split_live_ranges_around_calls(split_function);
+    const auto& function = split_function;
     EncodedFunction encoded;
     encoded.name = function.name;
     encoded.machine_instruction_count_before_optimization = function.machine_instructions_before_optimization;
@@ -810,6 +824,14 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
     encoded.callee_saved_allocation_count = allocation.callee_saved_allocation_count;
     encoded.weighted_spill_decision_count = allocation.weighted_spill_decision_count;
     encoded.allocation_copy_hint_count = allocation.copy_hint_count;
+    encoded.segmented_interval_count = allocation.segmented_interval_count;
+    encoded.live_range_hole_count = allocation.live_range_hole_count;
+    encoded.interference_edge_count = allocation.interference_edge_count;
+    encoded.hole_aware_register_reuse_count = allocation.hole_aware_register_reuse_count;
+    encoded.live_range_split_count = split_stats.split_values;
+    encoded.split_transition_store_count = split_stats.transition_stores;
+    encoded.split_transition_load_count = split_stats.transition_loads;
+    encoded.split_transition_byte_count = split_stats.transition_bytes;
 
     const auto callee_saved = used_callee_saved_registers(allocation);
     const auto has_call = [&] {
@@ -821,6 +843,7 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
                 case machine::Opcode::call_f32:
                 case machine::Opcode::call_f64:
                 case machine::Opcode::call_void:
+                case machine::Opcode::call_aggregate:
                 case machine::Opcode::call_indirect_i32:
                 case machine::Opcode::call_indirect_i64:
                 case machine::Opcode::call_indirect_f32:
@@ -1119,7 +1142,12 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
     const auto write_integer_cached64 = [&](const machine::AllocationLocation& location, Register source) {
         write_integer_cached(location, source, true);
     };
-    const auto prepare_call_arguments = [&](std::span<const machine::VirtualRegister> call_arguments) -> std::uint32_t {
+    struct PreparedCall {
+        std::uint32_t area{};
+        std::optional<std::int32_t> preserved_pointer_offset;
+    };
+    const auto prepare_call_arguments = [&](std::span<const machine::VirtualRegister> call_arguments,
+                                            std::optional<machine::VirtualRegister> preserved_pointer = std::nullopt) -> PreparedCall {
         std::vector<machine::RegisterClass> classes;
         classes.reserve(call_arguments.size());
         bool has_integer = false;
@@ -1145,12 +1173,19 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
         const auto stack_base = abi == Abi::windows ? 32U : 0U;
         if (abi == Abi::windows) encoded.abi_shadow_space_byte_count += 32U;
         const auto snapshot_base = stack_base + stack_count * 8U;
-        const auto raw_call_area = snapshot_base + register_count * 8U;
+        const auto preserved_pointer_offset = preserved_pointer
+            ? std::optional<std::uint32_t>(snapshot_base + register_count * 8U) : std::nullopt;
+        const auto raw_call_area = snapshot_base + register_count * 8U + (preserved_pointer ? 8U : 0U);
         const auto fixed_depth = static_cast<std::uint32_t>(callee_saved.size() * 8U + 16U);
         const auto alignment_pad = (16U - ((fixed_depth + raw_call_area) & 15U)) & 15U;
         encoded.abi_alignment_padding_byte_count += alignment_pad;
         const auto call_area = raw_call_area + alignment_pad;
         emit_adjust_rsp(out, true, call_area);
+
+        if (preserved_pointer && preserved_pointer_offset) {
+            emit_read_location64(out, Register::eax, allocation.location(*preserved_pointer));
+            emit_store_rsp64(out, Register::eax, static_cast<std::int32_t>(*preserved_pointer_offset));
+        }
 
         // First commit stack arguments directly and snapshot every register argument.
         // Register destinations can overlap XMM allocation registers (xmm2-xmm5), so
@@ -1195,7 +1230,9 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
                 emit_mov_register(out, args[placement.index], Register::eax);
             }
         }
-        return call_area;
+        return {call_area, preserved_pointer_offset
+            ? std::optional<std::int32_t>(static_cast<std::int32_t>(*preserved_pointer_offset))
+            : std::nullopt};
     };
     if (!omit_leaf_frame) {
         out.byte(0x55);
@@ -1249,6 +1286,7 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
                 instruction.opcode != machine::Opcode::return_f32 &&
                 instruction.opcode != machine::Opcode::return_f64 &&
                 instruction.opcode != machine::Opcode::return_void &&
+                instruction.opcode != machine::Opcode::return_aggregate &&
                 instruction.opcode != machine::Opcode::call_void &&
                 instruction.opcode != machine::Opcode::call_indirect_void &&
                 instruction.opcode != machine::Opcode::jump &&
@@ -1970,10 +2008,10 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
                 out.byte(0x41); out.byte(0x52);
                 out.byte(0x41); out.byte(0x53);
                 const std::span call_args(instruction.inputs.data() + 1, instruction.inputs.size() - 1);
-                const auto call_area = prepare_call_arguments(call_args);
+                const auto prepared_call = prepare_call_arguments(call_args);
                 emit_read_location64(out, Register::eax, allocation.location(instruction.inputs[0]));
                 out.byte(0xFF); out.byte(0xD0);
-                emit_adjust_rsp(out, false, call_area);
+                emit_adjust_rsp(out, false, prepared_call.area);
                 out.byte(0x41); out.byte(0x5B);
                 out.byte(0x41); out.byte(0x5A);
                 if (instruction.opcode == machine::Opcode::call_indirect_i64) write_integer_cached64(allocation.location(instruction.result), Register::eax);
@@ -1986,19 +2024,47 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
             case machine::Opcode::call_i64:
             case machine::Opcode::call_f32:
             case machine::Opcode::call_f64:
-            case machine::Opcode::call_void: {
-                if (instruction.symbol.empty() || instruction.inputs.size() > 64) {
+            case machine::Opcode::call_void:
+            case machine::Opcode::call_aggregate: {
+                const bool aggregate_call = instruction.opcode == machine::Opcode::call_aggregate;
+                if (instruction.symbol.empty() || instruction.inputs.size() > 65 ||
+                    (aggregate_call && instruction.inputs.empty())) {
                     add_error(diagnostics, "unsupported call signature in @" + function.name);
                     return encoded;
                 }
                 out.byte(0x41); out.byte(0x52);
                 out.byte(0x41); out.byte(0x53);
-                const auto call_area = prepare_call_arguments(instruction.inputs);
+                const std::span call_args = aggregate_call
+                    ? std::span(instruction.inputs.data() + 1, instruction.inputs.size() - 1)
+                    : std::span(instruction.inputs);
+                const auto prepared_call = prepare_call_arguments(call_args, aggregate_call
+                    ? std::optional<machine::VirtualRegister>(instruction.inputs[0]) : std::nullopt);
                 out.byte(0xE8);
                 const auto call_offset = out.size();
                 out.i32(0);
                 encoded.calls.push_back({call_offset, instruction.symbol});
-                emit_adjust_rsp(out, false, call_area);
+                if (aggregate_call) {
+                    if (!prepared_call.preserved_pointer_offset) {
+                        add_error(diagnostics, "missing aggregate return destination in @" + function.name);
+                        return encoded;
+                    }
+                    emit_load_rsp64(out, Register::r11d, *prepared_call.preserved_pointer_offset);
+                    const auto piece_count = instruction.argument_index & 0xFFU;
+                    std::uint32_t integer_index = 0;
+                    std::uint32_t floating_index = 0;
+                    for (std::uint32_t piece = 0; piece < piece_count; ++piece) {
+                        const bool floating = (instruction.argument_index & (1U << (8U + piece))) != 0;
+                        const auto displacement = static_cast<std::int32_t>(piece * 8U);
+                        if (floating) {
+                            const auto source = static_cast<XmmRegister>(floating_index++);
+                            emit_sse_ptr_store(out, Register::r11d, source, true, displacement);
+                        } else {
+                            const auto source = integer_index++ == 0U ? Register::eax : Register::edx;
+                            emit_store_ptr_i64(out, Register::r11d, source, displacement);
+                        }
+                    }
+                }
+                emit_adjust_rsp(out, false, prepared_call.area);
                 out.byte(0x41); out.byte(0x5B);
                 out.byte(0x41); out.byte(0x5A);
                 if (instruction.opcode == machine::Opcode::call_i64) write_integer_cached64(allocation.location(instruction.result), Register::eax);
@@ -2129,6 +2195,29 @@ EncodedFunction encode_function(const machine::Function& function, Abi abi, Diag
                     if (!diagnostics.empty()) return encoded;
                     emit_jump(out, instruction.successors[1].block, fixups);
                 }
+                break;
+            }
+            case machine::Opcode::return_aggregate: {
+                if (instruction.inputs.size() != 1U) {
+                    add_error(diagnostics, "malformed aggregate return in @" + function.name);
+                    return encoded;
+                }
+                emit_read_location64(out, Register::r11d, allocation.location(instruction.inputs[0]));
+                const auto piece_count = instruction.argument_index & 0xFFU;
+                std::uint32_t integer_index = 0;
+                std::uint32_t floating_index = 0;
+                for (std::uint32_t piece = 0; piece < piece_count; ++piece) {
+                    const bool floating = (instruction.argument_index & (1U << (8U + piece))) != 0;
+                    const auto displacement = static_cast<std::int32_t>(piece * 8U);
+                    if (floating) {
+                        const auto destination = static_cast<XmmRegister>(floating_index++);
+                        emit_sse_ptr_load(out, destination, Register::r11d, true, displacement);
+                    } else {
+                        const auto destination = integer_index++ == 0U ? Register::eax : Register::edx;
+                        emit_load_ptr_i64(out, destination, Register::r11d, displacement);
+                    }
+                }
+                emit_epilogue();
                 break;
             }
             case machine::Opcode::return_f32:

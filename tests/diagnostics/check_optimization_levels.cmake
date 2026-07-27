@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 if(NOT DEFINED FORGE_OPT OR NOT DEFINED FORGE OR NOT DEFINED INPUT OR NOT DEFINED OUTPUT_DIR)
   message(FATAL_ERROR "FORGE_OPT, FORGE, INPUT, and OUTPUT_DIR are required")
 endif()

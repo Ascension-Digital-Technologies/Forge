@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/diagnostics/format.hpp"
 #include "forge/codegen/x86_64/encoder.hpp"
 #include "forge/ir/parser.hpp"
@@ -206,7 +209,15 @@ int main(int argc, char** argv) {
                           << "  caller-saved-allocations=" << function.caller_saved_allocation_count
                           << "  callee-saved-allocations=" << function.callee_saved_allocation_count
                           << "  weighted-spill-decisions=" << function.weighted_spill_decision_count
-                          << "  allocation-copy-hints=" << function.allocation_copy_hint_count << '\n';
+                          << "  allocation-copy-hints=" << function.allocation_copy_hint_count
+                          << "  segmented-intervals=" << function.segmented_interval_count
+                          << "  live-range-holes=" << function.live_range_hole_count
+                          << "  interference-edges=" << function.interference_edge_count
+                          << "  hole-aware-register-reuses=" << function.hole_aware_register_reuse_count << '\n'
+                          << "  live-range-splits=" << function.live_range_split_count << '\n'
+                          << "  split-transition-stores=" << function.split_transition_store_count << '\n'
+                          << "  split-transition-loads=" << function.split_transition_load_count << '\n'
+                          << "  split-transition-bytes=" << function.split_transition_byte_count << '\n';
             }
             std::cout << '@' << function.name << "  " << function.code.size() << " bytes\n"
                       << forge::codegen::x86_64::format_hex(function.code) << '\n';

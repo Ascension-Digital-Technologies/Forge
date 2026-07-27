@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/interpreter/interpreter.hpp"
 #include "forge/ir/parser.hpp"
 #include "forge/ir/printer.hpp"
@@ -62,6 +65,64 @@ dead(%unused: i32):
 
         const auto text = forge::ir::print_module(*parsed.module);
         require(text.find("dead(") == std::string::npos, "dead block remains after SCCP");
+
+        constexpr auto memory_source = R"(module @memory_forward {
+func @forward() -> i64 {
+entry:
+  %left = stack.alloc ptr 8 align 8
+  %right = stack.alloc ptr 8 align 8
+  %ten = const i64 10
+  %twenty = const i64 20
+  store i64 %ten %left align 8
+  %first = load i64 %left align 8
+  store i64 %twenty %right align 8
+  %second = load i64 %left align 8
+  %sum = add i64 %first %second
+  return %sum
+}
+})";
+        auto memory = forge::ir::parse_module(memory_source);
+        require(memory.ok(), "memory-forwarding fixture failed to parse");
+        forge::pass::PassManager memory_pipeline;
+        memory_pipeline.add<forge::transforms::MemoryForwardingPass>()
+                       .add<forge::transforms::CopyPropagationPass>()
+                       .add<forge::transforms::DeadCodeEliminationPass>();
+        const auto memory_stats = memory_pipeline.run(*memory.module);
+        require(memory_stats.operations_rewritten >= 2, "store/load forwarding did not rewrite both loads");
+        const auto memory_text = forge::ir::print_module(*memory.module);
+        require(memory_text.find("load i64 %left") == std::string::npos, "forwarded loads remain in IR");
+        const auto memory_result = forge::interpreter::execute(*memory.module, "forward", {});
+        require(memory_result.value.has_value() && memory_result.value->signed_value() == 20, "memory forwarding changed semantics");
+
+        constexpr auto loop_source = R"(module @licm {
+func @loop(%start: i64) -> i64 {
+entry:
+  %limit = const i64 8
+  jump header(%start)
+header(%value: i64):
+  %step = const i64 2
+  %next = add i64 %value %step
+  %again = cmp.lt i64 %next %limit
+  branch %again, header(%next), exit(%next)
+exit(%result: i64):
+  return %result
+}
+})";
+        auto loop = forge::ir::parse_module(loop_source);
+        require(loop.ok(), "LICM fixture failed to parse");
+        auto& loop_function = loop.module->functions().front();
+        forge::analysis::FunctionAnalysisManager loop_analyses(loop_function);
+        forge::transforms::LoopInvariantCodeMotionPass licm;
+        const auto licm_stats = licm.run(loop_function, loop_analyses);
+        require(licm_stats.changed && licm_stats.operations_rewritten >= 1, "LICM did not hoist invariant operation");
+        const auto loop_text = forge::ir::print_module(*loop.module);
+        const auto entry_position = loop_text.find("%step = const i64 2");
+        const auto header_position = loop_text.find("header(");
+        require(entry_position != std::string::npos && entry_position < header_position, "LICM did not move invariant into preheader");
+        const std::vector<forge::interpreter::Value> loop_arguments{
+            forge::interpreter::Value::integer(forge::ir::i64_type(), 0)};
+        const auto loop_result = forge::interpreter::execute(*loop.module, "loop", loop_arguments);
+        require(loop_result.value.has_value() && loop_result.value->signed_value() == 8, "LICM changed loop semantics");
         std::cout << "Forge optimization tests passed\n";
         return 0;
     } catch (const std::exception& error) {

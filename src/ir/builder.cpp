@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/builder.hpp"
 #include "forge/ir/verifier.hpp"
 #include <algorithm>
@@ -76,6 +79,19 @@ BlockHandle IRBuilder::find_block(FunctionHandle function, std::string_view name
     throw std::out_of_range("unknown block ^" + std::string(name));
 }
 
+void IRBuilder::position_at_end(Block& block) {
+    for (std::size_t function_index = 0; function_index < module_->functions().size(); ++function_index) {
+        auto& blocks = module_->functions()[function_index].blocks;
+        for (std::size_t block_index = 0; block_index < blocks.size(); ++block_index) {
+            if (&blocks[block_index] == &block) {
+                block_ = BlockHandle{function_index, block_index};
+                return;
+            }
+        }
+    }
+    throw std::invalid_argument("block does not belong to this IRBuilder module");
+}
+
 std::string IRBuilder::next_value_name() { return "%v" + std::to_string(next_value_++); }
 
 void IRBuilder::set_module_metadata(std::string name, std::string value) {
@@ -100,19 +116,25 @@ void IRBuilder::set_next_attribute(std::string name, std::string value) {
 }
 
 bool IRBuilder::insertion_block_terminated() const noexcept {
-    return block_ != nullptr && !block_->operations.empty() && block_->operations.back().is_terminator();
+    if (!block_) return false;
+    try {
+        const auto& block = resolve(*block_);
+        return !block.operations.empty() && block.operations.back().is_terminator();
+    } catch (...) {
+        return false;
+    }
 }
 
 Diagnostics IRBuilder::verify() const { return verify_module(*module_); }
 
 Operation& IRBuilder::append(Operation operation) {
-    if (block_ == nullptr) {
+    if (!block_) {
         throw std::logic_error("IRBuilder has no insertion block");
     }
     if (insertion_block_terminated()) {
         const auto location = location_.file.empty() ? std::string{} :
             location_.file + ":" + std::to_string(location_.line) + ":" + std::to_string(location_.column) + ": ";
-        throw std::logic_error(location + "cannot append " + operation.opcode + " after terminator in ^" + block_->name);
+        throw std::logic_error(location + "cannot append " + operation.opcode + " after terminator in ^" + resolve(*block_).name);
     }
     operation.source_file = location_.file;
     operation.source_line = location_.line;
@@ -121,8 +143,9 @@ Operation& IRBuilder::append(Operation operation) {
     operation.source_end_column = location_.end_column;
     operation.attributes = std::move(next_attributes_);
     next_attributes_.clear();
-    block_->operations.push_back(std::move(operation));
-    return block_->operations.back();
+    auto& block = resolve(*block_);
+    block.operations.push_back(std::move(operation));
+    return block.operations.back();
 }
 
 std::string IRBuilder::create_constant(Type type, std::string literal) {

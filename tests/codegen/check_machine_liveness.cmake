@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(
   COMMAND "${CODEGEN}" "${INPUT}" --machine-ir --stats
   RESULT_VARIABLE result

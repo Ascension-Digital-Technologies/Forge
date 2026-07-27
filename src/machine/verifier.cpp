@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/verifier.hpp"
 
 #include <unordered_map>
@@ -9,7 +12,7 @@ void error(Diagnostics& out, std::string message) {
     out.push_back({DiagnosticSeverity::error, std::move(message), {}});
 }
 bool has_result(Opcode opcode) {
-    return opcode != Opcode::jump && opcode != Opcode::branch_i1 && opcode != Opcode::return_i32 && opcode != Opcode::return_i64 && opcode != Opcode::return_f32 && opcode != Opcode::return_f64 && opcode != Opcode::return_void && opcode != Opcode::call_void && opcode != Opcode::call_indirect_void && opcode != Opcode::store_stack_i8 && opcode != Opcode::store_stack_i16 && opcode != Opcode::store_stack_i32 && opcode != Opcode::store_stack_i64 && opcode != Opcode::store_stack_f32 && opcode != Opcode::store_stack_f64 && opcode != Opcode::store_ptr_i8 && opcode != Opcode::store_ptr_i16 && opcode != Opcode::store_ptr_i32 && opcode != Opcode::store_ptr_i64 && opcode != Opcode::store_ptr_f32 && opcode != Opcode::store_ptr_f64;
+    return opcode != Opcode::jump && opcode != Opcode::branch_i1 && opcode != Opcode::return_i32 && opcode != Opcode::return_i64 && opcode != Opcode::return_f32 && opcode != Opcode::return_f64 && opcode != Opcode::return_void && opcode != Opcode::return_aggregate && opcode != Opcode::call_void && opcode != Opcode::call_aggregate && opcode != Opcode::call_indirect_void && opcode != Opcode::store_stack_i8 && opcode != Opcode::store_stack_i16 && opcode != Opcode::store_stack_i32 && opcode != Opcode::store_stack_i64 && opcode != Opcode::store_stack_f32 && opcode != Opcode::store_stack_f64 && opcode != Opcode::store_ptr_i8 && opcode != Opcode::store_ptr_i16 && opcode != Opcode::store_ptr_i32 && opcode != Opcode::store_ptr_i64 && opcode != Opcode::store_ptr_f32 && opcode != Opcode::store_ptr_f64;
 }
 
 bool is_float_arithmetic(Opcode opcode) {
@@ -65,7 +68,7 @@ bool supports_integer_immediate(Opcode opcode) {
 }
 
 bool is_terminator(Opcode opcode) {
-    return opcode == Opcode::jump || opcode == Opcode::branch_i1 || opcode == Opcode::return_i32 || opcode == Opcode::return_i64 || opcode == Opcode::return_f32 || opcode == Opcode::return_f64 || opcode == Opcode::return_void;
+    return opcode == Opcode::jump || opcode == Opcode::branch_i1 || opcode == Opcode::return_i32 || opcode == Opcode::return_i64 || opcode == Opcode::return_f32 || opcode == Opcode::return_f64 || opcode == Opcode::return_void || opcode == Opcode::return_aggregate;
 }
 std::size_t expected_inputs(Opcode opcode) {
     switch (opcode) {
@@ -123,12 +126,14 @@ std::size_t expected_inputs(Opcode opcode) {
     case Opcode::store_ptr_f32:
     case Opcode::store_ptr_f64: return 2;
     case Opcode::return_void: return 0;
+    case Opcode::return_aggregate: return 1;
     case Opcode::jump: return 0;
     case Opcode::call_i32:
     case Opcode::call_i64:
     case Opcode::call_f32:
     case Opcode::call_f64:
     case Opcode::call_void:
+    case Opcode::call_aggregate:
     case Opcode::call_indirect_i32:
     case Opcode::call_indirect_i64:
     case Opcode::call_indirect_f32:
@@ -190,7 +195,7 @@ Diagnostics verify_module(const Module& module) {
                     error(diagnostics, "immediate store on unsupported opcode in @" + function.name);
                 if (expected != static_cast<std::size_t>(-1) && ins.inputs.size() != expected) error(diagnostics, "wrong operand count for " + std::string(opcode_name(ins.opcode)) + " in @" + function.name);
                 for (auto reg : ins.inputs) if (reg >= function.register_count) error(diagnostics, "input virtual register out of range in @" + function.name);
-                if ((ins.opcode == Opcode::call_i32 || ins.opcode == Opcode::call_i64 || ins.opcode == Opcode::call_f32 || ins.opcode == Opcode::call_f64 || ins.opcode == Opcode::call_void || ins.opcode == Opcode::load_function_address || ins.opcode == Opcode::load_global_address) && ins.symbol.empty()) error(diagnostics, "call has empty target in @" + function.name);
+                if ((ins.opcode == Opcode::call_i32 || ins.opcode == Opcode::call_i64 || ins.opcode == Opcode::call_f32 || ins.opcode == Opcode::call_f64 || ins.opcode == Opcode::call_void || ins.opcode == Opcode::call_aggregate || ins.opcode == Opcode::load_function_address || ins.opcode == Opcode::load_global_address) && ins.symbol.empty()) error(diagnostics, "call has empty target in @" + function.name);
                 if ((ins.opcode == Opcode::call_indirect_i32 || ins.opcode == Opcode::call_indirect_i64 || ins.opcode == Opcode::call_indirect_f32 || ins.opcode == Opcode::call_indirect_f64 || ins.opcode == Opcode::call_indirect_void) && ins.inputs.empty()) error(diagnostics, "indirect call has no target in @" + function.name);
                 const auto stack_access_size = [&]() -> std::int64_t {
                     switch (ins.opcode) {

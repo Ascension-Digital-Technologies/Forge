@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/binary.hpp"
 #include "forge/ir/verifier.hpp"
 #include <array>
@@ -139,6 +142,8 @@ BinaryWriteResult write_binary(const Module& module) {
             payload.string(global.function_signature_name);
             payload.u8(global.is_constant ? 1 : 0);
             payload.u8(global.is_external ? 1 : 0);
+            payload.u8(static_cast<std::uint8_t>(global.linkage));
+            payload.u8(static_cast<std::uint8_t>(global.visibility));
             payload.string(global.initializer);
             payload.u32(global.element_count);
             payload.u32(global.alignment);
@@ -149,6 +154,10 @@ BinaryWriteResult write_binary(const Module& module) {
             payload.string(function.name);
             payload.u8(function.is_external ? 1U : 0U);
             payload.u8(function.is_signature ? 1U : 0U);
+            payload.u8(function.variadic ? 1U : 0U);
+            payload.u8(static_cast<std::uint8_t>(function.calling_convention));
+            payload.u8(static_cast<std::uint8_t>(function.linkage));
+            payload.u8(static_cast<std::uint8_t>(function.visibility));
             payload.type(function.return_type);
             payload.u8(static_cast<std::uint8_t>(function.return_aggregate_kind));
             payload.string(function.return_aggregate_name);
@@ -245,6 +254,14 @@ BinaryReadResult read_binary(std::span<const std::byte> bytes) {
                 }
                 global.is_constant = payload.u8() != 0;
                 global.is_external = minor >= 4 ? payload.u8() != 0 : false;
+                if (minor >= 22) {
+                    const auto linkage = payload.u8();
+                    const auto visibility = payload.u8();
+                    if (linkage > static_cast<std::uint8_t>(SymbolLinkage::weak)) throw std::runtime_error("invalid global linkage");
+                    if (visibility > static_cast<std::uint8_t>(SymbolVisibility::hidden)) throw std::runtime_error("invalid global visibility");
+                    global.linkage = static_cast<SymbolLinkage>(linkage);
+                    global.visibility = static_cast<SymbolVisibility>(visibility);
+                }
                 global.initializer = payload.string();
                 if (minor >= 5) {
                     global.element_count = payload.u32();
@@ -262,6 +279,18 @@ BinaryReadResult read_binary(std::span<const std::byte> bytes) {
             if (minor >= 18) {
                 function.is_external = payload.u8() != 0;
                 function.is_signature = payload.u8() != 0;
+            }
+            if (minor >= 22) {
+                function.variadic = payload.u8() != 0;
+                const auto convention = payload.u8();
+                const auto linkage = payload.u8();
+                const auto visibility = payload.u8();
+                if (convention > static_cast<std::uint8_t>(CallingConvention::fast)) throw std::runtime_error("invalid calling convention");
+                if (linkage > static_cast<std::uint8_t>(SymbolLinkage::weak)) throw std::runtime_error("invalid function linkage");
+                if (visibility > static_cast<std::uint8_t>(SymbolVisibility::hidden)) throw std::runtime_error("invalid function visibility");
+                function.calling_convention = static_cast<CallingConvention>(convention);
+                function.linkage = static_cast<SymbolLinkage>(linkage);
+                function.visibility = static_cast<SymbolVisibility>(visibility);
             }
             function.return_type = payload.type();
             if (minor >= 11) {

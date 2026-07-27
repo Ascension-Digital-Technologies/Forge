@@ -1,6 +1,10 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/lower.hpp"
 #include "forge/machine/optimize.hpp"
 #include "forge/target/data_layout.hpp"
+#include "forge/target/abi.hpp"
 #include "forge/machine/verifier.hpp"
 
 #include <algorithm>
@@ -97,6 +101,44 @@ struct StackAddress {
     std::uint32_t object_size{};
     std::uint32_t offset{};
 };
+
+constexpr target::NativeAbi host_native_abi() noexcept {
+#if defined(_WIN32)
+    return target::NativeAbi::windows_x64;
+#else
+    return target::NativeAbi::system_v_x86_64;
+#endif
+}
+
+bool uses_native_aggregate_abi(const ir::Function& function) noexcept {
+    return function.calling_convention == ir::CallingConvention::c ||
+           function.calling_convention == ir::CallingConvention::system_v ||
+           function.calling_convention == ir::CallingConvention::windows_x64;
+}
+
+target::NativeAbi function_native_abi(const ir::Function& function) noexcept {
+    if (function.calling_convention == ir::CallingConvention::windows_x64)
+        return target::NativeAbi::windows_x64;
+    if (function.calling_convention == ir::CallingConvention::system_v)
+        return target::NativeAbi::system_v_x86_64;
+    return host_native_abi();
+}
+
+struct AggregateParameterLowering {
+    bool direct{};
+    target::AggregateAbiClassification classification;
+};
+
+RegisterClass abi_register_class(target::AbiValueClass value) noexcept {
+    return value == target::AbiValueClass::sse ? RegisterClass::floating : RegisterClass::integer;
+}
+
+std::uint32_t encode_aggregate_return(const target::AggregateAbiClassification& classification) noexcept {
+    std::uint32_t encoded = classification.register_count;
+    for (std::size_t index = 0; index < classification.register_count; ++index)
+        if (classification.classes[index] == target::AbiValueClass::sse) encoded |= 1U << (8U + index);
+    return encoded;
+}
 
 unsigned integer_width(ir::Type type) {
     switch (type.kind()) {
@@ -206,14 +248,51 @@ LowerResult lower_module(const ir::Module& source) {
             continue;
         }
 
+        bool failed = false;
         Function lowered;
         lowered.name = function.name;
-        lowered.argument_count = static_cast<std::uint32_t>(function.parameters.size() + (function.return_owned ? 1U : 0U));
-        if (function.return_owned) { lowered.argument_widths.push_back(8U); lowered.argument_classes.push_back(RegisterClass::integer); }
-        for (const auto& parameter : function.parameters) {
+        std::vector<AggregateParameterLowering> aggregate_parameters(function.parameters.size());
+        std::optional<target::AggregateAbiClassification> aggregate_return;
+        bool direct_native_return = false;
+        if (function.return_owned) {
+            aggregate_return = target::classify_aggregate(source, function.return_aggregate_kind,
+                function.return_aggregate_name, function_native_abi(function), host_layout);
+            if (!aggregate_return) {
+                error(result.diagnostics, "cannot classify aggregate return in @" + function.name);
+                continue;
+            }
+            direct_native_return = uses_native_aggregate_abi(function) && aggregate_return->register_passed() &&
+                                   !aggregate_return->returned_indirectly;
+            if (!direct_native_return) {
+                lowered.argument_widths.push_back(8U);
+                lowered.argument_classes.push_back(RegisterClass::integer);
+            }
+        }
+        for (std::size_t parameter_index = 0; parameter_index < function.parameters.size(); ++parameter_index) {
+            const auto& parameter = function.parameters[parameter_index];
+            if (parameter.is_aggregate()) {
+                const auto classified = target::classify_aggregate(source, parameter.aggregate_kind,
+                    parameter.aggregate_name, function_native_abi(function), host_layout);
+                if (!classified) {
+                    error(result.diagnostics, "cannot classify aggregate parameter " + parameter.name + " in @" + function.name);
+                    failed = true;
+                    break;
+                }
+                aggregate_parameters[parameter_index].classification = *classified;
+                aggregate_parameters[parameter_index].direct = uses_native_aggregate_abi(function) && classified->register_passed();
+                if (classified->register_passed()) {
+                    for (std::size_t piece = 0; piece < classified->register_count; ++piece) {
+                        lowered.argument_widths.push_back(8U);
+                        lowered.argument_classes.push_back(abi_register_class(classified->classes[piece]));
+                    }
+                    continue;
+                }
+            }
             lowered.argument_widths.push_back(parameter.type == ir::Type(ir::TypeKind::f64) || parameter.type == ir::Type(ir::TypeKind::i64) || parameter.type == ir::Type(ir::TypeKind::ptr) ? 8U : 4U);
             lowered.argument_classes.push_back(parameter.type.is_float() ? RegisterClass::floating : RegisterClass::integer);
         }
+        if (failed) continue;
+        lowered.argument_count = static_cast<std::uint32_t>(lowered.argument_widths.size());
         std::unordered_map<std::string, VirtualRegister> registers;
         std::unordered_map<std::string, ir::Type> value_types;
         std::unordered_map<std::string, StackAddress> addresses;
@@ -226,7 +305,6 @@ LowerResult lower_module(const ir::Module& source) {
                     operation.opcode.starts_with("cmp.") ? ir::Type(ir::TypeKind::i1) : operation.type);
             }
         }
-        bool failed = false;
         const auto allocate_register = [&](ir::Type type) {
             const auto reg = lowered.register_count++;
             const bool wide = type == ir::Type(ir::TypeKind::i64) || type == ir::Type(ir::TypeKind::ptr) || type == ir::Type(ir::TypeKind::f64);
@@ -235,16 +313,16 @@ LowerResult lower_module(const ir::Module& source) {
             return reg;
         };
         std::optional<VirtualRegister> owned_result_register;
-        if (function.return_owned) owned_result_register = allocate_register(ir::Type(ir::TypeKind::ptr));
+        if (function.return_owned && !direct_native_return) owned_result_register = allocate_register(ir::Type(ir::TypeKind::ptr));
 
         for (std::size_t index = 0; index < function.parameters.size(); ++index) {
             const auto& parameter = function.parameters[index];
-            if (parameter.type != ir::Type(ir::TypeKind::i32) && parameter.type != ir::Type(ir::TypeKind::i64) && parameter.type != ir::Type(ir::TypeKind::i1) && parameter.type != ir::Type(ir::TypeKind::ptr) && parameter.type != ir::Type(ir::TypeKind::f32) && parameter.type != ir::Type(ir::TypeKind::f64)) {
-                error(result.diagnostics, "machine lowering supports only scalar parameters in @" + function.name);
+            if (!parameter.is_aggregate() && parameter.type != ir::Type(ir::TypeKind::i32) && parameter.type != ir::Type(ir::TypeKind::i64) && parameter.type != ir::Type(ir::TypeKind::i1) && parameter.type != ir::Type(ir::TypeKind::ptr) && parameter.type != ir::Type(ir::TypeKind::f32) && parameter.type != ir::Type(ir::TypeKind::f64)) {
+                error(result.diagnostics, "machine lowering supports only scalar or named aggregate parameters in @" + function.name);
                 failed = true;
                 break;
             }
-            registers.emplace(parameter.name, allocate_register(parameter.type));
+            registers.emplace(parameter.name, allocate_register(parameter.is_aggregate() ? ir::Type(ir::TypeKind::ptr) : parameter.type));
         }
         if (failed) continue;
 
@@ -292,19 +370,37 @@ LowerResult lower_module(const ir::Module& source) {
         auto& entry = lowered.blocks.front();
         if (owned_result_register)
             entry.instructions.push_back({Opcode::load_argument_i64, *owned_result_register, {}, 0, 0, {}, {}});
-        std::uint32_t floating_argument_index = 0;
+        std::uint32_t argument_index = function.return_owned && !direct_native_return ? 1U : 0U;
         for (std::size_t index = 0; index < function.parameters.size(); ++index) {
-            const auto type = function.parameters[index].type;
+            const auto& parameter = function.parameters[index];
+            const auto& aggregate = aggregate_parameters[index];
+            if (aggregate.direct) {
+                const auto alignment = static_cast<std::uint32_t>(aggregate.classification.alignment);
+                const auto allocated = static_cast<std::uint32_t>((aggregate.classification.size + 7U) & ~7U);
+                const auto base = (lowered.local_stack_size + alignment - 1U) & ~(alignment - 1U);
+                lowered.local_stack_size = base + allocated;
+                const auto destination = registers.at(parameter.name);
+                entry.instructions.push_back({Opcode::load_stack_address, destination, {},
+                    -static_cast<std::int64_t>(base + allocated), 0, {}, {}});
+                for (std::size_t piece = 0; piece < aggregate.classification.register_count; ++piece) {
+                    const bool floating = aggregate.classification.classes[piece] == target::AbiValueClass::sse;
+                    const auto value = allocate_register(floating ? ir::Type(ir::TypeKind::f64) : ir::Type(ir::TypeKind::i64));
+                    entry.instructions.push_back({floating ? Opcode::load_argument_f64 : Opcode::load_argument_i64,
+                        value, {}, 0, argument_index++, {}, {}});
+                    entry.instructions.push_back({floating ? Opcode::store_ptr_f64 : Opcode::store_ptr_i64,
+                        0, {value, destination}, static_cast<std::int64_t>(piece * 8U), 0, {}, {}});
+                }
+                continue;
+            }
+            const auto type = parameter.type;
             const auto opcode = type == ir::Type(ir::TypeKind::f32) ? Opcode::load_argument_f32 :
                                 type == ir::Type(ir::TypeKind::f64) ? Opcode::load_argument_f64 :
                                 (type == ir::Type(ir::TypeKind::i64) || type == ir::Type(ir::TypeKind::ptr)) ? Opcode::load_argument_i64 : Opcode::load_argument;
-            Instruction argument{opcode, registers.at(function.parameters[index].name), {}, static_cast<std::int64_t>(floating_argument_index),
-                                 static_cast<std::uint32_t>(index + (function.return_owned ? 1U : 0U)), {}, {}};
-            entry.instructions.push_back(std::move(argument));
-            if (type.is_float()) ++floating_argument_index;
+            entry.instructions.push_back({opcode, registers.at(parameter.name), {}, 0, argument_index++, {}, {}});
         }
-        for (const auto& parameter : function.parameters) {
-            if (!parameter.owned) continue;
+        for (std::size_t parameter_index = 0; parameter_index < function.parameters.size(); ++parameter_index) {
+            const auto& parameter = function.parameters[parameter_index];
+            if (!parameter.owned || aggregate_parameters[parameter_index].direct) continue;
             const auto& sizes = parameter.aggregate_kind == ir::AggregateRefKind::structure ? struct_sizes : array_sizes;
             const auto& alignments = parameter.aggregate_kind == ir::AggregateRefKind::structure ? struct_alignments : array_alignments;
             const auto size_it = sizes.find(parameter.aggregate_name);
@@ -385,7 +481,8 @@ LowerResult lower_module(const ir::Module& source) {
                         const auto resolved = size_table.find(function.return_aggregate_name);
                         const auto source_register = operation.operands.size() == 1 ? registers.find(operation.operands[0]) : registers.end();
                         const auto source_address = operation.operands.size() == 1 ? addresses.find(operation.operands[0]) : addresses.end();
-                        if (!owned_result_register || resolved == size_table.end() || (source_register == registers.end() && source_address == addresses.end())) {
+                        if (resolved == size_table.end() || (source_register == registers.end() && source_address == addresses.end()) ||
+                            (!direct_native_return && !owned_result_register)) {
                             error(result.diagnostics, "invalid owned aggregate return in @" + function.name); failed = true;
                         } else {
                             VirtualRegister source{};
@@ -394,10 +491,17 @@ LowerResult lower_module(const ir::Module& source) {
                                 source = allocate_register(ir::Type(ir::TypeKind::ptr));
                                 machine_block.instructions.push_back({Opcode::load_stack_address, source, {}, -static_cast<std::int64_t>(source_address->second.object_base + source_address->second.object_size - source_address->second.offset), 0, {}, {}});
                             }
-                            const auto count = allocate_register(ir::Type(ir::TypeKind::i64));
-                            machine_block.instructions.push_back({Opcode::load_immediate_i64, count, {}, static_cast<std::int64_t>(resolved->second), 0, {}, {}});
-                            machine_block.instructions.push_back({Opcode::call_void, 0, {*owned_result_register, source, count}, 0, 0, "__forge_memmove", {}});
-                            instruction.opcode = Opcode::return_void;
+                            if (direct_native_return) {
+                                instruction.opcode = Opcode::return_aggregate;
+                                instruction.inputs = {source};
+                                instruction.immediate = static_cast<std::int64_t>(aggregate_return->size);
+                                instruction.argument_index = encode_aggregate_return(*aggregate_return);
+                            } else {
+                                const auto count = allocate_register(ir::Type(ir::TypeKind::i64));
+                                machine_block.instructions.push_back({Opcode::load_immediate_i64, count, {}, static_cast<std::int64_t>(resolved->second), 0, {}, {}});
+                                machine_block.instructions.push_back({Opcode::call_void, 0, {*owned_result_register, source, count}, 0, 0, "__forge_memmove", {}});
+                                instruction.opcode = Opcode::return_void;
+                            }
                         }
                     } else if (function.return_type == ir::Type(ir::TypeKind::void_)) {
                         instruction.opcode = Opcode::return_void;
@@ -562,6 +666,25 @@ LowerResult lower_module(const ir::Module& source) {
                                     -static_cast<std::int64_t>(address->second.object_base + address->second.object_size - address->second.offset), 0, {}, {}});
                             }
                             const auto source_register = source_it == registers.end() ? materialized_source : source_it->second;
+                            if (target && index < target->parameters.size() && target->parameters[index].is_aggregate()) {
+                                const auto& aggregate_parameter = target->parameters[index];
+                                const auto classified = target::classify_aggregate(source, aggregate_parameter.aggregate_kind,
+                                    aggregate_parameter.aggregate_name, function_native_abi(*target), host_layout);
+                                if (!classified) {
+                                    error(result.diagnostics, "cannot classify aggregate call argument in @" + function.name);
+                                    return false;
+                                }
+                                if (uses_native_aggregate_abi(*target) && classified->register_passed()) {
+                                    for (std::size_t piece = 0; piece < classified->register_count; ++piece) {
+                                        const bool floating = classified->classes[piece] == target::AbiValueClass::sse;
+                                        const auto value = allocate_register(floating ? ir::Type(ir::TypeKind::f64) : ir::Type(ir::TypeKind::i64));
+                                        machine_block.instructions.push_back({floating ? Opcode::load_ptr_f64 : Opcode::load_ptr_i64,
+                                            value, {source_register}, static_cast<std::int64_t>(piece * 8U), 0, {}, {}});
+                                        call_instruction.inputs.push_back(value);
+                                    }
+                                    continue;
+                                }
+                            }
                             if (!target || index >= target->parameters.size() || !target->parameters[index].owned) {
                                 call_instruction.inputs.push_back(source_register);
                                 continue;
@@ -605,9 +728,17 @@ LowerResult lower_module(const ir::Module& source) {
                             lowered.local_stack_size = base + allocated;
                             const auto destination = allocate_register(ir::Type(ir::TypeKind::ptr));
                             machine_block.instructions.push_back({Opcode::load_stack_address, destination, {}, -static_cast<std::int64_t>(base + allocated), 0, {}, {}});
-                            instruction.opcode = Opcode::call_void;
+                            const auto return_classification = target::classify_aggregate(source, target.return_aggregate_kind,
+                                target.return_aggregate_name, function_native_abi(target), host_layout);
+                            const bool direct_return = return_classification && uses_native_aggregate_abi(target) &&
+                                return_classification->register_passed() && !return_classification->returned_indirectly;
+                            instruction.opcode = direct_return ? Opcode::call_aggregate : Opcode::call_void;
                             instruction.symbol = target.name;
                             instruction.inputs.push_back(destination);
+                            if (direct_return) {
+                                instruction.immediate = static_cast<std::int64_t>(return_classification->size);
+                                instruction.argument_index = encode_aggregate_return(*return_classification);
+                            }
                             failed = !append_call_arguments(instruction, &target);
                         }
                     } else if (operation.type == ir::Type(ir::TypeKind::void_)) {

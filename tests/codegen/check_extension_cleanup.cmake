@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 if(NOT DEFINED CODEGEN OR NOT DEFINED INPUT)
   message(FATAL_ERROR "CODEGEN and INPUT are required")
 endif()

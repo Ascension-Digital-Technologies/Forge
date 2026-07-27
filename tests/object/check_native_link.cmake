@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(COMMAND "${FORGE}" compile "${INPUT}" --format=elf -o "${OBJECT}" RESULT_VARIABLE compile_result)
 if(NOT compile_result EQUAL 0)
   message(FATAL_ERROR "Forge object compilation failed")

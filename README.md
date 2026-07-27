@@ -4,10 +4,10 @@
 
 **A verified compiler infrastructure toolkit for building native language frontends.**
 
-[![Release](https://img.shields.io/badge/release-1.0.0-2563eb)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/release-2.0.0-2563eb)](CHANGELOG.md)
 [![C++](https://img.shields.io/badge/C%2B%2B-20-00599c)](CMakeLists.txt)
 [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a)](LICENSE)
-[![C API](https://img.shields.io/badge/C%20API-v9-7c3aed)](include/forge-c/forge.h)
+[![C API](https://img.shields.io/badge/C%20API-v10-7c3aed)](include/forge-c/forge.h)
 [![Target](https://img.shields.io/badge/target-x86--64-334155)](#platform-support)
 
 Forge provides typed SSA IR, verification, optimization pipelines, an interpreter, an x86-64 JIT and native backend, deterministic ELF/COFF output, and frontend SDKs for C++ and C.
@@ -50,7 +50,8 @@ Machine IR · allocation · x86-64 encoding
 | **IR** | Typed SSA, block arguments, globals, calls, aggregates, canonical text, binary serialization |
 | **Optimization** | `-O0` through `-O3`, `-Os`, `-Oz`, liveness, DCE, CFG cleanup, copy propagation, pass reports |
 | **Execution** | Reference interpreter, x86-64 JIT, runtime bindings, interpreter/JIT differential tests |
-| **Native output** | System V and Windows x64 lowering, deterministic ELF64 and COFF AMD64 objects |
+| **Native output** | System V and Windows x64 lowering, deterministic ELF64/COFF objects, static archives, shared-library linking |
+| **ABI tooling** | Aggregate classification, variadic/calling-convention metadata, register and stack usage summaries |
 | **Incremental builds** | Fingerprints, dependency invalidation, parallel scheduling, cached functions, object and executable caching |
 
 ## Quick start
@@ -102,13 +103,20 @@ forge compile examples/native-i64.fir -O2 --format=elf -o native.o
 
 # Compare interpreter and JIT results
 forge-run --engine=compare examples/interpreter.fir factorial 10
+
+# Create a native static library
+forge compile examples/library-answer.fir --format=elf -o answer.o
+forge archive create -o libanswer.a answer.o
+
+# Link a shared library with the host compiler driver
+forge link-shared --linker=c++ -o libanswer.so answer.o
 ```
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `forge` | Verify, optimize, and compile Forge IR |
+| `forge` | Verify, optimize, compile, archive, and link Forge IR artifacts |
 | `forge-as` | Assemble textual IR into binary IR |
 | `forge-dis` | Disassemble binary IR into canonical text |
 | `forge-opt` | Run optimization pipelines and report pass statistics |
@@ -162,7 +170,7 @@ const auto diagnostics = builder.verify();
 ```c
 #include <forge-c/forge.h>
 
-#if FORGE_C_API_VERSION != 9
+#if FORGE_C_API_VERSION != 10
 #error "Unsupported Forge C API version"
 #endif
 ```
@@ -175,6 +183,19 @@ Start with:
 - [MiniLang complete frontend](examples/frontend/minilang/) — lexer, parser, AST, semantic lowering, interpreter, and JIT
 - [Tiny IRBuilder example](examples/frontend/tiny_frontend.cpp)
 - [Standalone frontend template](examples/frontend/template/)
+
+## Native ABI and libraries
+
+Forge exposes System V AMD64 and Windows x64 aggregate ABI classification through `<forge/target/abi.hpp>`. Frontends can inspect integer/SSE classes, indirect passing, register consumption, stack bytes, and variadic state before lowering language-level signatures.
+
+Function declarations also carry calling-convention, linkage, visibility, and variadic metadata through textual and binary IR. See [Native ABI classification and libraries](docs/abi-and-libraries.md).
+
+Native library workflows:
+
+```sh
+forge archive create -o libmath.a math.o helpers.o
+forge link-shared --linker=c++ -o libmath.so math.o helpers.o
+```
 
 ## Native backend
 
@@ -232,11 +253,27 @@ cmake --install build/release-strict --prefix "$PWD/_install"
 Consumer project:
 
 ```cmake
-find_package(Forge 1.0 CONFIG REQUIRED)
+find_package(Forge 2.0 CONFIG REQUIRED)
 target_link_libraries(my_compiler PRIVATE Forge::forge)
 ```
 
 The release matrix installs Forge into an isolated prefix and builds independent C and C++ consumers against the installed package.
+
+## Optimizer and analysis
+
+Forge ships reusable function analyses and a deterministic scalar optimization pipeline. Forge 1.3 adds conservative alias analysis and natural-loop discovery, allowing the optimizer to forward memory values across proven-disjoint stores and hoist safe loop-invariant expressions from canonical loop headers.
+
+```text
+CFG + dominators + use/def
+          |
+          +-- pointer-origin alias analysis
+          +-- natural-loop discovery
+          |
+          v
+SCCP -> algebraic simplification -> CSE -> memory forwarding -> LICM -> DCE -> CFG cleanup
+```
+
+The alias analysis intentionally returns `may_alias` when provenance or offsets are uncertain. This keeps the transformations correct for arbitrary frontend-generated pointer code while still recognizing stack allocations and distinct globals as non-aliasing. See [Optimizer and analysis](docs/optimizer.md).
 
 ## Platform support
 
@@ -253,12 +290,13 @@ The release matrix installs Forge into an isolated prefix and builds independent
 
 ## Project status and boundaries
 
-Forge 1.0.0 is the first stable public release of the documented compiler-core and x86-64 scalar/pointer feature set.
+Forge 2.0.0 is the stabilized production release of the compiler core, frontend SDK, native library workflows, optimizer, allocator, and x86-64 backend. The unified driver adds `forge inspect`, `forge explain`, and `forge doctor`; explicit native calling conventions support by-value aggregate parameters and register-classified aggregate returns, while ABI-indirect aggregates continue through hidden result buffers.
 
 The following are not currently part of the supported surface:
 
-- Native by-value aggregate ABI classification
-- True variadic function definitions
+- Register-classified by-value aggregate machine lowering (classification is available)
+- True variadic function definitions (external/signature metadata is available)
+- Per-function mixed calling conventions in one emitted object
 - Unwind and debug metadata
 - Segmented live-range register allocation
 - Architectures other than x86-64
@@ -287,6 +325,7 @@ scripts/             Reproducible release and sanitizer gates
 | [Architecture](docs/architecture.md) | Pipeline, subsystem responsibilities, and invariants |
 | [IR reference](docs/ir-reference.md) | Core IR concepts and verification rules |
 | [Backend](docs/backend.md) | Machine IR, allocation, ABI, encoding, and objects |
+| [ABI and libraries](docs/abi-and-libraries.md) | Aggregate classification, static archives, and shared libraries |
 | [CLI reference](docs/cli.md) | Command-line tools and optimization levels |
 | [Building a language](docs/building-a-language.md) | C++ SDK and C API integration |
 | [Release readiness](docs/release-readiness.md) | Supported production contract and release gates |
@@ -301,4 +340,27 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 
 ## License
 
-Forge is licensed under the [Apache License 2.0](LICENSE).
+Forge is licensed under the [Apache License 2.0](LICENSE). Maintained source, header, test, example, and build-script files carry SPDX headers identifying Copyright 2026 Mario Vinciguerra.
+
+## Frontend Development Kit
+
+Forge 1.3 includes reusable source management, structured diagnostics, nested symbol scopes, semantic declarations, and safe control-flow builders under `<forge/frontend/frontend.hpp>`.
+
+Create a standalone frontend project with:
+
+```bash
+forge new-language Aurora aurora
+```
+
+See [Frontend Development Kit](docs/frontend-development-kit.md) and the complete [MiniLang example](examples/frontend/minilang/README.md).
+
+
+## Production inspection
+
+```bash
+forge inspect examples/optimization.fir --stage=all
+forge explain examples/optimization.fir -O3
+forge doctor
+```
+
+See [`docs/stabilization.md`](docs/stabilization.md) for the strict and sanitizer validation model.

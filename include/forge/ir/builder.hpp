@@ -1,7 +1,11 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <optional>
 #include <vector>
 #include "forge/ir/context.hpp"
 #include "forge/ir/opcode.hpp"
@@ -38,12 +42,12 @@ public:
     [[nodiscard]] const Block& resolve(BlockHandle handle) const;
     [[nodiscard]] FunctionHandle find_function(std::string_view name) const;
     [[nodiscard]] BlockHandle find_block(FunctionHandle function, std::string_view name) const;
-    void position_at_end(Block& block) noexcept { block_ = &block; }
-    void position_at_end(BlockHandle block) { block_ = &resolve(block); }
-    [[nodiscard]] bool has_insertion_point() const noexcept { return block_ != nullptr; }
+    void position_at_end(Block& block);
+    void position_at_end(BlockHandle block) { (void)resolve(block); block_ = block; }
+    [[nodiscard]] bool has_insertion_point() const noexcept { return block_.has_value(); }
     [[nodiscard]] bool insertion_block_terminated() const noexcept;
     [[nodiscard]] Diagnostics verify() const;
-    void clear_insertion_point() noexcept { block_ = nullptr; }
+    void clear_insertion_point() noexcept { block_.reset(); }
     void set_source_location(SourceLocation location) { location_ = std::move(location); }
     void set_source_range(std::string file, std::uint32_t line, std::uint32_t column,
                           std::uint32_t end_line, std::uint32_t end_column) {
@@ -84,7 +88,7 @@ private:
     [[nodiscard]] std::string next_value_name();
     Operation& append(Operation operation);
     Module* module_{};
-    Block* block_{};
+    std::optional<BlockHandle> block_;
     SourceLocation location_{};
     std::vector<Attribute> next_attributes_;
     std::uint64_t next_value_{};

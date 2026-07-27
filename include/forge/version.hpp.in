@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #define FORGE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@

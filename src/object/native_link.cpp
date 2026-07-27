@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/object/native_link.hpp"
 
 #include <cstdlib>
@@ -173,6 +176,60 @@ NativeLinkResult link_cached_native_executable(const ir::IncrementalBuildPlan& p
         cache.store(result.cache_key, binary);
         write_file_atomic(output_path, binary);
         result.binary_bytes = binary.size();
+    } catch (const std::exception& exception) {
+        add_error(result.diagnostics, exception.what());
+    }
+    return result;
+}
+
+
+NativeLibraryLinkResult link_native_shared_library(
+    std::span<const std::filesystem::path> object_paths,
+    const std::filesystem::path& output_path,
+    const NativeLinkOptions& options) {
+    NativeLibraryLinkResult result;
+    result.output_path = output_path;
+    result.input_count = object_paths.size();
+    if (object_paths.empty()) {
+        add_error(result.diagnostics, "shared library link requires at least one object file");
+        return result;
+    }
+    if (output_path.empty()) {
+        add_error(result.diagnostics, "shared library output path is empty");
+        return result;
+    }
+    try {
+        for (const auto& path : object_paths)
+            if (!std::filesystem::is_regular_file(path))
+                throw std::runtime_error("shared library input does not exist: " + path.string());
+        if (!output_path.parent_path().empty()) std::filesystem::create_directories(output_path.parent_path());
+        const auto temporary_output = std::filesystem::path(output_path.string() + ".forge-shared-output");
+        std::ostringstream command;
+        command << quote_argument(options.linker.string()) << " -shared";
+        for (const auto& path : object_paths) command << ' ' << quote_argument(path.string());
+        for (const auto& argument : options.arguments) command << ' ' << quote_argument(argument);
+        for (const auto& path : options.library_paths) command << " -L" << quote_argument(path.string());
+        for (const auto& library : options.libraries) command << " -l" << quote_argument(library);
+        command << " -o " << quote_argument(temporary_output.string());
+        result.command = command.str();
+        const int status = std::system(result.command.c_str());
+        if (status != 0 || !std::filesystem::is_regular_file(temporary_output)) {
+            std::filesystem::remove(temporary_output);
+            add_error(result.diagnostics, "shared library linker failed with status " + std::to_string(status));
+            return result;
+        }
+        std::error_code error;
+        std::filesystem::rename(temporary_output, output_path, error);
+        if (error) {
+            std::filesystem::remove(output_path, error);
+            error.clear();
+            std::filesystem::rename(temporary_output, output_path, error);
+            if (error) {
+                std::filesystem::remove(temporary_output);
+                throw std::runtime_error("failed to commit shared library: " + output_path.string());
+            }
+        }
+        result.output_bytes = std::filesystem::file_size(output_path);
     } catch (const std::exception& exception) {
         add_error(result.diagnostics, exception.what());
     }

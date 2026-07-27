@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/module.hpp"
 
 #include <sstream>
@@ -125,6 +128,7 @@ const char* opcode_name(Opcode opcode) noexcept {
     case Opcode::call_f32: return "call_f32";
     case Opcode::call_f64: return "call_f64";
     case Opcode::call_void: return "call_void";
+    case Opcode::call_aggregate: return "call_aggregate";
     case Opcode::call_indirect_i32: return "call_indirect_i32";
     case Opcode::call_indirect_i64: return "call_indirect_i64";
     case Opcode::call_indirect_f32: return "call_indirect_f32";
@@ -137,6 +141,7 @@ const char* opcode_name(Opcode opcode) noexcept {
     case Opcode::return_f32: return "return_f32";
     case Opcode::return_f64: return "return_f64";
     case Opcode::return_void: return "return_void";
+    case Opcode::return_aggregate: return "return_aggregate";
     }
     return "invalid";
 }
@@ -194,7 +199,9 @@ std::string print_module(const Module& module) {
                                         instruction.opcode != Opcode::return_f32 &&
                                         instruction.opcode != Opcode::return_f64 &&
                                         instruction.opcode != Opcode::return_void &&
+                                        instruction.opcode != Opcode::return_aggregate &&
                                         instruction.opcode != Opcode::call_void &&
+                                        instruction.opcode != Opcode::call_aggregate &&
                                         instruction.opcode != Opcode::call_indirect_void &&
                                         instruction.opcode != Opcode::store_stack_i8 &&
                                         instruction.opcode != Opcode::store_stack_i16 &&
@@ -212,7 +219,7 @@ std::string print_module(const Module& module) {
                                         instruction.opcode != Opcode::branch_i1;
                 if (has_result) out << 'v' << instruction.result << " = ";
                 out << opcode_name(instruction.opcode);
-                if (instruction.opcode == Opcode::call_i32 || instruction.opcode == Opcode::call_i64 || instruction.opcode == Opcode::call_void || instruction.opcode == Opcode::load_function_address || instruction.opcode == Opcode::load_global_address) out << " @" << instruction.symbol;
+                if (instruction.opcode == Opcode::call_i32 || instruction.opcode == Opcode::call_i64 || instruction.opcode == Opcode::call_void || instruction.opcode == Opcode::call_aggregate || instruction.opcode == Opcode::load_function_address || instruction.opcode == Opcode::load_global_address) out << " @" << instruction.symbol;
             if (instruction.opcode == Opcode::load_argument || instruction.opcode == Opcode::load_argument_i64 || instruction.opcode == Opcode::load_argument_f32 || instruction.opcode == Opcode::load_argument_f64) out << ' ' << instruction.argument_index;
                 else if (instruction.opcode == Opcode::load_immediate || instruction.opcode == Opcode::load_immediate_i64 || instruction.opcode == Opcode::load_immediate_f32 || instruction.opcode == Opcode::load_immediate_f64 || instruction.opcode == Opcode::load_stack_i8 || instruction.opcode == Opcode::load_stack_i16 || instruction.opcode == Opcode::load_stack_i32 || instruction.opcode == Opcode::load_stack_i64 || instruction.opcode == Opcode::load_stack_f32 || instruction.opcode == Opcode::load_stack_f64) out << ' ' << instruction.immediate;
                 else if (instruction.opcode == Opcode::ptr_offset) out << " v" << instruction.inputs[0] << ", " << instruction.immediate;

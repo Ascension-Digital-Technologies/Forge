@@ -1,3 +1,6 @@
+# Copyright 2026 Mario Vinciguerra
+# SPDX-License-Identifier: Apache-2.0
+
 execute_process(COMMAND "${FORGE_CODEGEN}" "${INPUT}" --stats RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT result EQUAL 0)
  message(FATAL_ERROR "forge-codegen failed: ${error}")

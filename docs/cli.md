@@ -50,3 +50,19 @@ forge-run --engine=compare input.fir function_name 1 2
 - `-Oz`: minimize code size
 
 Use each tool's `--help` output as the authoritative option list for the installed version.
+
+## Static archives
+
+```sh
+forge archive create -o libmath.a math.o helpers.o
+```
+
+Forge extracts ELF64 or COFF AMD64 symbols and writes a deterministic native archive index.
+
+## Shared libraries
+
+```sh
+forge link-shared --linker=c++ -o libmath.so math.o helpers.o
+```
+
+Pass additional arguments with `--link-arg=<argument>`.

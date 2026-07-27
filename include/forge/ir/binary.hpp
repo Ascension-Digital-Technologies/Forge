@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +12,7 @@
 
 namespace forge::ir {
 inline constexpr std::uint16_t binary_format_major = 1;
-inline constexpr std::uint16_t binary_format_minor = 21;
+inline constexpr std::uint16_t binary_format_minor = 22;
 
 struct BinaryWriteResult {
     std::vector<std::byte> bytes;

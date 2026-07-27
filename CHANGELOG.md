@@ -1,53 +1,147 @@
+## 2.0.0 - 2026-07-27
+
+- Cleaned the repository root by removing generated duplicate Forge IR fixtures; canonical examples now live exclusively under `examples/`.
+- Unified production driver commands: `forge inspect`, `forge explain`, and `forge doctor`.
+- Sanitizer gate separates JIT execution from sanitizer-safe compiler-core coverage.
+- Finalized aggregate ABI parameters and returns, allocator closure, frontend SDK, native libraries, and deterministic release workflows.
+
 # Changelog
 
-All notable changes to Forge are documented here. Forge follows [Semantic Versioning](https://semver.org/).
+## 1.10.0 - 2026-07-27
 
-## 1.0.0 - 2026-07-27
+- Added executable native aggregate return lowering for explicit C, System V AMD64, and Windows x64 calling conventions.
+- Added INTEGER returns through RAX/RDX and SSE returns through XMM0/XMM1, including mixed INTEGER/SSE System V aggregates.
+- Added caller-side reconstruction of register-returned aggregates into aligned Forge aggregate storage.
+- Preserved hidden result-buffer lowering for ABI-indirect and larger aggregate returns.
+- Added bidirectional native C++ interoperability coverage for integer and mixed floating-point aggregate returns.
+- Corrected SSE pointer encoding for extended x86-64 base registers used by aggregate return reconstruction.
+
+## 1.9.0 - 2026-07-27
+
+- Added executable native by-value aggregate parameter lowering for System V AMD64 and Windows x64.
+- Small register-classified aggregate parameters are exploded into ABI integer/SSE pieces at call sites and reconstructed in callee-local storage.
+- Large and Windows-indirect aggregates preserve the existing pointer-based ABI path.
+- Added bidirectional native C++ interoperability coverage: native-to-Forge and Forge-to-native by-value struct calls.
+- Preserved hidden-result-buffer aggregate returns; direct aggregate return registers remain the final ABI-lowering milestone.
+
+## 1.8.0 - 2026-07-27
+
+- Added segmented-interference-aware global copy affinity coalescing across block boundaries and liveness holes.
+- Added recovery of copy destinations that were unnecessarily stack-backed when the source physical register is globally safe.
+- Added allocator metrics for global copy affinities and recovered copy spills.
+
+## 1.7.0 - 2026-07-27
+
+- Added critical-edge live-range splitting for call paths that converge with other predecessors.
+- Added explicit split-edge blocks with post-call reloads.
+- Added SSA merge repair through machine block parameters and predecessor edge arguments.
+- Added allocator metrics for critical-edge split values, edge blocks, and merge parameters.
+- Added strict regression coverage for mixed call/non-call control-flow convergence.
+
+## 1.6.0 - 2026-07-27
+
+- Added conservative CFG-wide call-boundary splitting into single-predecessor continuation blocks.
+- Added cross-block transition accounting while preserving critical-edge safety.
+
+## 1.5.0 - 2026-07-27
 
 ### Added
 
-- MiniLang, a complete educational frontend showing source text through lexer, parser, AST, semantic lowering, Forge IR verification, interpretation, source maps, and x86-64 JIT execution.
-- A permanent strict-build regression for the complete frontend example.
+- True transition-based live-range splitting around calls.
+- Explicit register-to-stack stores before high-pressure call boundaries.
+- Explicit stack-to-register reloads into new post-call virtual registers.
+- Independent allocation of pre-call and post-call live-range pieces.
+- Split-transition statistics in `forge-codegen --stats`.
+- A regression proving five call-crossing values are reduced to two callee-saved intervals with three balanced store/reload transitions.
 
-### Documentation
+### Changed
 
-- Expanded the language-building guide and README to make MiniLang the recommended starting point for frontend authors.
-- Documented stable handle usage, frontend-owned semantic checks, source-range propagation, and interpreter/JIT differential validation.
+- Floating values live across calls are split when their remaining uses stay in the same block.
+- Integer values beyond the two available callee-saved allocation registers are split conservatively at call boundaries.
+- Split slots are reserved in the function-local frame and participate in normal frame alignment.
 
-Forge 1.0.0 establishes the first stable public release of the compiler core and frontend SDK.
+### Safety
 
-### Compiler infrastructure
+- The first transition splitter is deliberately limited to same-block post-call uses. Values live through CFG successors remain on the existing conservative callee-saved/spill path until edge-copy splitting is introduced.
 
-- Typed, verified SSA IR with canonical text and binary serialization
-- Deterministic optimization pipelines with six optimization levels
-- Reference interpreter and x86-64 JIT with differential testing
-- x86-64 machine lowering, register allocation, code generation, and ABI support
-- Deterministic ELF64 and COFF AMD64 object emission
+All notable changes to Forge are documented here. Forge follows [Semantic Versioning](https://semver.org/).
 
-### Frontend SDK
+## 1.4.0 - 2026-07-27
 
-- Typed C++ IR builder with stable function and block handles
-- Source ranges, structured diagnostics, metadata, and source maps
-- Opaque C API v9 for FFI integrations
-- Incremental fingerprints, manifests, dependency analysis, and build planning
+### Added
 
-### Incremental native pipeline
+- Segmented machine live intervals that retain disjoint per-block liveness regions.
+- Exact interference-edge analysis derived from segmented liveness.
+- Hole-aware register recovery for mutually exclusive CFG paths.
+- Allocator statistics for segmented intervals, live-range holes, interference edges, and recovered registers.
+- A permanent interleaved-branch regression proving false bounding-range spills are recovered.
 
-- Per-function native artifacts and atomic artifact caching
-- Dependency-aware invalidation and deterministic parallel scheduling
-- Cached ELF/COFF object assembly
-- Cache-aware native linking and final executable reuse
+### Changed
 
-### Release quality
+- Register-pressure measurements now use real liveness segments rather than one start/end bounding interval.
+- Spilled values are reconsidered after linear scan and may reuse a physical register when no segmented interference exists.
 
-- Apache-2.0 licensing
-- Strict warnings-as-errors builds
-- ASan, UBSan, leak, fuzz-smoke, deterministic-output, native-link, and installed-package gates
-- Professional project documentation and package-consumer examples
-- MinGW-safe `windows.h` inclusion under strict `-Werror` builds
-- Clang-clean ELF object writer with dead section constants removed under strict `-Werror` builds
-- Windows Clang/MSVC-STL-safe empty aggregate layout coverage without zero-length `std::array` construction
-- Platform-gated native-link test helpers so Windows strict builds do not fail on unused Unix-only functions
+## 1.3.0 - 2026-07-27
+
+### Added
+
+- Conservative pointer-origin and alias analysis for stack allocations, globals, pointer arguments, copies, and constant pointer offsets.
+- Public natural-loop discovery with canonical latch, header, block-set, and unique-preheader information.
+- Alias-aware memory forwarding that removes redundant loads and forwards stored values across unrelated memory writes.
+- Safe loop-invariant code motion for non-trapping operations in canonical loop headers.
+- `memory-forwarding` and `licm` passes in the standard `-O2`/`-O3` pipelines.
+- Regression coverage for overlapping ranges, disjoint stack objects, call invalidation, redundant loads, and loop semantics.
+
+### Changed
+
+- `-O2` now includes alias-aware memory forwarding.
+- `-O3` now performs loop-invariant code motion before CSE and memory forwarding.
+
+## 1.2.0 - 2026-07-27
+
+### Native ABI support
+
+- Added public System V AMD64 and Windows x64 aggregate ABI classification.
+- Added integer, SSE, memory, and indirect aggregate classes.
+- Added per-function ABI summaries covering register use, stack bytes, variadic state, and aggregate parameters.
+- Added function calling-convention metadata for platform, C, System V, Windows x64, and fast conventions.
+- Added variadic, internal, weak, and hidden symbol metadata to textual and binary Forge IR.
+- Added C API v10 setters and deterministic function ABI JSON.
+
+### Native libraries
+
+- Added deterministic static archive generation for ELF64 and COFF AMD64 objects.
+- Added a real archive symbol index accepted by native linkers.
+- Added GNU long-member-name support and deterministic archive metadata.
+- Added `forge archive create` for `.a` and compatible `.lib` archives.
+- Added `forge link-shared` for host-toolchain shared-library linking.
+- Added native static-library and shared-library link-and-run release gates.
+
+### Quality
+
+- Added ABI classification, signature metadata, binary round-trip, archive determinism, corrupt-object, and native library tests.
+- Increased the strict release matrix to 63 tests.
+- Preserved repository-wide Apache-2.0 licensing headers and the source hygiene gate.
+
+### Current boundary
+
+Forge exposes native ABI classification for frontend lowering decisions. Named aggregates in the current machine-code pipeline remain represented through pointer or hidden-result-storage lowering; register-classified by-value aggregate code generation remains planned work.
+
+## 1.1.0 - 2026-07-27
+
+### Frontend Development Kit
+
+- Added reusable source management, structured diagnostics, nested scopes, symbols, semantic declarations, and safe control-flow builders.
+- Added `forge new-language` project scaffolding.
+- Added repository-wide Apache-2.0 SPDX headers with Copyright 2026 Mario Vinciguerra.
+- Added a repository hygiene gate that rejects unlicensed maintained source and build files.
+- Fixed IRBuilder insertion-point lifetime by storing stable block handles across block-vector growth.
+- Added MiniLang, a complete educational frontend showing source text through lexer, parser, AST, semantic lowering, Forge IR verification, interpretation, source maps, and x86-64 JIT execution.
+
+## 1.0.0 - 2026-07-27
+
+- Established the stable public compiler-core, frontend SDK, interpreter, x86-64 backend, object writers, incremental build pipeline, and release-quality contract.
+- Added deterministic ELF64 and COFF AMD64 output, JIT/interpreter differential testing, cache-aware native linking, installed-package consumers, fuzz-smoke tests, and professional open-source documentation.
 
 ## Pre-1.0 development
 

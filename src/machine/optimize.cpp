@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/machine/optimize.hpp"
 #include "forge/machine/liveness.hpp"
 
@@ -18,10 +21,10 @@ bool has_result(Opcode opcode) noexcept {
     case Opcode::store_stack_i64: case Opcode::store_stack_f32: case Opcode::store_stack_f64:
     case Opcode::store_ptr_i8: case Opcode::store_ptr_i16: case Opcode::store_ptr_i32:
     case Opcode::store_ptr_i64: case Opcode::store_ptr_f32: case Opcode::store_ptr_f64:
-    case Opcode::call_void: case Opcode::call_indirect_void:
+    case Opcode::call_void: case Opcode::call_aggregate: case Opcode::call_indirect_void:
     case Opcode::jump: case Opcode::branch_i1:
     case Opcode::return_i32: case Opcode::return_i64: case Opcode::return_f32:
-    case Opcode::return_f64: case Opcode::return_void:
+    case Opcode::return_f64: case Opcode::return_void: case Opcode::return_aggregate:
         return false;
     default:
         return true;
@@ -39,13 +42,13 @@ bool is_removable_when_dead(Opcode opcode) noexcept {
     case Opcode::load_ptr_i8: case Opcode::load_ptr_i16: case Opcode::load_ptr_i32:
     case Opcode::load_ptr_i64: case Opcode::load_ptr_f32: case Opcode::load_ptr_f64:
     case Opcode::call_i32: case Opcode::call_i64: case Opcode::call_f32: case Opcode::call_f64:
-    case Opcode::call_void: case Opcode::call_indirect_i32: case Opcode::call_indirect_i64:
+    case Opcode::call_void: case Opcode::call_aggregate: case Opcode::call_indirect_i32: case Opcode::call_indirect_i64:
     case Opcode::call_indirect_f32: case Opcode::call_indirect_f64: case Opcode::call_indirect_void:
     case Opcode::div_s_i32: case Opcode::div_s_i64: case Opcode::div_u_i32: case Opcode::div_u_i64:
     case Opcode::rem_s_i32: case Opcode::rem_s_i64: case Opcode::rem_u_i32: case Opcode::rem_u_i64:
     case Opcode::jump: case Opcode::branch_i1:
     case Opcode::return_i32: case Opcode::return_i64: case Opcode::return_f32:
-    case Opcode::return_f64: case Opcode::return_void:
+    case Opcode::return_f64: case Opcode::return_void: case Opcode::return_aggregate:
         return false;
     default:
         return true;
@@ -740,7 +743,7 @@ OptimizationStats optimize_function(Function& function) {
                 const bool has_result = instruction.opcode != Opcode::jump && instruction.opcode != Opcode::branch_i1 &&
                     instruction.opcode != Opcode::return_i32 && instruction.opcode != Opcode::return_i64 &&
                     instruction.opcode != Opcode::return_f32 && instruction.opcode != Opcode::return_f64 &&
-                    instruction.opcode != Opcode::return_void && instruction.opcode != Opcode::call_void &&
+                    instruction.opcode != Opcode::return_void && instruction.opcode != Opcode::return_aggregate && instruction.opcode != Opcode::call_void && instruction.opcode != Opcode::call_aggregate &&
                     instruction.opcode != Opcode::call_indirect_void &&
                     instruction.opcode != Opcode::store_stack_i8 && instruction.opcode != Opcode::store_stack_i16 &&
                     instruction.opcode != Opcode::store_stack_i32 && instruction.opcode != Opcode::store_stack_i64 &&

@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #include "forge/ir/binary.hpp"
 #include "forge/ir/parser.hpp"
 #include <filesystem>

@@ -37,7 +37,7 @@ Call marshaling snapshots every register-bound argument before writing any ABI d
 - Mandatory 32-byte shadow space
 - Exact alignment padding
 
-Aggregates are currently lowered through pointers or hidden result storage. True native by-value aggregate classification and variadic signatures remain future work.
+Forge keeps aggregates pointer-oriented internally, but explicit native calling conventions lower eligible by-value parameters and returns through the platform ABI. ABI-indirect aggregates use hidden result storage.
 
 ## Instruction selection and code quality
 
@@ -79,3 +79,55 @@ The backend does not yet provide:
 - Non-x86-64 targets
 
 These are tracked as future backend milestones rather than implied capabilities.
+
+## ABI classification
+
+`<forge/target/abi.hpp>` classifies named aggregates for System V AMD64 and Windows x64. This analysis is intended for frontend signature lowering and future register-classified aggregate code generation.
+
+## Native libraries
+
+`<forge/object/archive.hpp>` emits deterministic static archives with linker symbol indexes for ELF64 and COFF AMD64 members. `<forge/object/native_link.hpp>` can invoke a host compiler driver to produce shared libraries.
+
+## Segmented liveness and hole-aware allocation
+
+Forge records each virtual register as a set of disjoint live segments instead of relying only on a single bounding interval. This matters when mutually exclusive control-flow paths are interleaved in physical block order: their bounding intervals may overlap even though the values can never be live at the same time.
+
+The allocator uses these segments to:
+
+- measure register pressure from actual live regions;
+- build exact same-class interference edges;
+- identify live-range holes; and
+- recover physical registers for false spills after the initial linear scan.
+
+This release keeps one final location per virtual register. It does not yet move a value between a register and a spill slot along one genuinely live path; explicit transition-based splitting remains a future allocator stage.
+
+`forge-codegen --stats` reports:
+
+```text
+segmented-intervals
+live-range-holes
+interference-edges
+hole-aware-register-reuses
+```
+
+## Transition-based live-range splitting
+
+Forge 1.5 inserts explicit split transitions at call boundaries when register pressure exceeds the ABI-safe register capacity. Eligible values are stored to compiler-reserved frame slots immediately before the call, reloaded into new virtual registers immediately afterward, and all dominated same-block uses are rewritten to the post-call segment.
+
+The initial implementation is conservative: it handles same-block post-call uses, splits all floating call-crossing values supported by the scalar backend, and splits integer values beyond the two callee-saved allocation registers. Values carried across CFG edges remain on the existing conservative allocation path.
+
+`forge-codegen --stats` reports `live-range-splits`, `split-transition-stores`, `split-transition-loads`, and `split-transition-bytes`.
+
+### Critical-edge transition splitting
+
+When a call path converges with other predecessors, Forge can create a dedicated split-edge block, reload spilled values there, and merge the reloaded/original values through machine block parameters. This preserves SSA semantics across multi-predecessor continuations without globally rewriting values that remain valid on other paths.
+
+The current implementation handles a single successor from the call block and repairs all incoming edge argument lists deterministically.
+
+## Global copy-affinity coalescing
+
+Forge 1.8 extends local linear-scan copy reuse with a post-allocation affinity stage. The stage uses segmented interference rather than bounding intervals, allowing copy-related virtual registers separated by control-flow layout or liveness holes to share a physical register when no real segment conflicts. Stack-backed copy destinations are recovered when the source register remains globally safe. Allocation statistics expose `global_copy_affinity_count` and `copy_spills_recovered`.
+
+## Native aggregate parameters
+
+Forge 1.10 lowers named aggregate parameters and returns according to the configured native x86-64 ABI. Register-passed parameters are expanded into INTEGER/SSE pieces and reconstructed in callee-local storage. Register-returned aggregates are loaded into RAX/RDX and XMM0/XMM1 as classified, and callers reconstruct them into aligned Forge aggregate storage. ABI-indirect aggregates retain the hidden result-buffer path.

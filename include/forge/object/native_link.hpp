@@ -1,3 +1,6 @@
+// Copyright 2026 Mario Vinciguerra
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
 #include <cstddef>
@@ -45,6 +48,20 @@ struct NativeLinkResult {
     std::span<const machine::Global> globals,
     NativeObjectFormat format,
     codegen::x86_64::Abi abi,
+    const std::filesystem::path& output_path,
+    const NativeLinkOptions& options = {});
+
+struct NativeLibraryLinkResult {
+    Diagnostics diagnostics;
+    std::filesystem::path output_path;
+    std::string command;
+    std::size_t input_count{};
+    std::size_t output_bytes{};
+    [[nodiscard]] bool ok() const noexcept { return diagnostics.empty(); }
+};
+
+[[nodiscard]] NativeLibraryLinkResult link_native_shared_library(
+    std::span<const std::filesystem::path> object_paths,
     const std::filesystem::path& output_path,
     const NativeLinkOptions& options = {});
 
