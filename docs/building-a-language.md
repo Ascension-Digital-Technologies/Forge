@@ -81,9 +81,13 @@ Public headers include:
 - Public incremental and object orchestration headers are supported SDK surfaces.
 - `forge::machine`, target encoders, and internal writer implementation details are unstable.
 
-## Examples
+## Complete example frontend
 
-- `examples/frontend/tiny_frontend.cpp`
-- `examples/frontend/template/`
-- `tests/frontend_builder.cpp`
-- `tests/c_api.c`
+Start with [`examples/frontend/minilang/`](../examples/frontend/minilang/). It demonstrates a realistic source-to-execution pipeline with a lexer, recursive-descent parser, independent AST, semantic checks, source ranges, Forge IR lowering, verification, interpretation, and x86-64 JIT execution.
+
+Smaller references:
+
+- `examples/frontend/tiny_frontend.cpp` — minimal IRBuilder usage
+- `examples/frontend/template/` — standalone installed-package skeleton
+- `tests/frontend/builder_tests.cpp` — builder API coverage
+- `tests/frontend/c_api_tests.cpp` — C API coverage

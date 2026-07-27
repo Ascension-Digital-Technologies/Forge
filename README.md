@@ -172,7 +172,8 @@ The opaque C API is suitable for Rust, Zig, Go, C#, Python extensions, Dash, and
 Start with:
 
 - [Building a language with Forge](docs/building-a-language.md)
-- [Tiny frontend example](examples/frontend/tiny_frontend.cpp)
+- [MiniLang complete frontend](examples/frontend/minilang/) — lexer, parser, AST, semantic lowering, interpreter, and JIT
+- [Tiny IRBuilder example](examples/frontend/tiny_frontend.cpp)
 - [Standalone frontend template](examples/frontend/template/)
 
 ## Native backend

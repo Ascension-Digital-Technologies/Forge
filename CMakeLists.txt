@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(Forge
- VERSION 1.0.0
+ VERSION 1.0.1
  DESCRIPTION "Verified deterministic compiler core and x86-64 backend"
  LANGUAGES CXX)
 option(FORGE_BUILD_TESTS "Build Forge tests" ON)
@@ -103,6 +103,16 @@ if(FORGE_BUILD_TESTS)
  forge_add_test(forge-diagnostic-tests tests/diagnostics/diagnostic_tests.cpp)
  forge_add_test(forge-ir-tests tests/ir/ir_tests.cpp)
  forge_add_test(forge-builder-tests tests/frontend/builder_tests.cpp)
+ add_executable(forge-minilang-example
+  examples/frontend/minilang/src/main.cpp
+  examples/frontend/minilang/src/lexer.cpp
+  examples/frontend/minilang/src/parser.cpp
+  examples/frontend/minilang/src/codegen.cpp)
+ target_include_directories(forge-minilang-example PRIVATE examples/frontend/minilang/include)
+ target_link_libraries(forge-minilang-example PRIVATE Forge::forge)
+ forge_apply_warnings(forge-minilang-example)
+ add_test(NAME forge-minilang-frontend-example
+  COMMAND forge-minilang-example ${CMAKE_CURRENT_SOURCE_DIR}/examples/frontend/minilang/example.mini main --source-map)
  forge_add_test(forge-c-api-tests tests/frontend/c_api_tests.cpp)
  forge_add_test(forge-incremental-cache-tests tests/frontend/incremental_cache_tests.cpp)
  forge_add_test(forge-build-driver-tests tests/frontend/build_driver_tests.cpp)

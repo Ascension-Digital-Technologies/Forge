@@ -22,3 +22,10 @@ Run through both execution engines and compare results:
 ```sh
 forge-run --engine=compare examples/interpreter.fir factorial 10
 ```
+
+
+## Frontend examples
+
+- `frontend/minilang/` — complete educational language frontend from source text through JIT execution
+- `frontend/tiny_frontend.cpp` — minimal IRBuilder example
+- `frontend/template/` — standalone CMake consumer template

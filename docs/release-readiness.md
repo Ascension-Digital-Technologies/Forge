@@ -1,6 +1,6 @@
 # Release readiness
 
-Forge 1.0.0 is the first stable release of the documented compiler-core, frontend SDK, and x86-64 scalar/pointer backend.
+Forge 1.0.1 is the first stable release of the documented compiler-core, frontend SDK, and x86-64 scalar/pointer backend.
 
 ## Required release gates
 
