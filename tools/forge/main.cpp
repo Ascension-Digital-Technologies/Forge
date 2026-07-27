@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -24,6 +25,22 @@
 #include "forge/version.hpp"
 
 namespace {
+std::optional<std::string> read_environment(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) return std::nullopt;
+    std::string result(value);
+    std::free(value);
+    if (result.empty()) return std::nullopt;
+    return result;
+#else
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return std::nullopt;
+    return std::string(value);
+#endif
+}
+
 void usage() {
     std::cerr << "Forge " << FORGE_VERSION_STRING << "\n"
               << "usage: forge <command> [options]\n\n"
@@ -75,6 +92,7 @@ bool scaffold_language(std::string_view name, const std::filesystem::path& root)
 #include <forge/ir/context.hpp>
 #include <forge/ir/printer.hpp>
 #include <iostream>
+#include <optional>
 
 int main() {
     forge::ir::Context context;
@@ -134,9 +152,8 @@ int doctor() {
     namespace fs = std::filesystem;
     bool ok = true;
     const auto check_program = [&](std::string_view label, const char* environment, std::string_view fallback) {
-        std::string command;
-        if (const char* configured = std::getenv(environment); configured != nullptr && *configured != '\0') command = configured;
-        else command = std::string(fallback);
+        const auto configured = read_environment(environment);
+        const std::string command = configured.value_or(std::string(fallback));
 #if defined(_WIN32)
         const std::string probe = command + " --version >NUL 2>&1";
 #else
