@@ -1,0 +1,133 @@
+#ifndef FORGE_C_FORGE_H
+#define FORGE_C_FORGE_H
+
+#define FORGE_C_API_VERSION 9
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct forge_context forge_context_t;
+typedef struct forge_module forge_module_t;
+typedef struct forge_function forge_function_t;
+typedef struct forge_block forge_block_t;
+typedef struct forge_builder forge_builder_t;
+
+typedef enum forge_type_kind {
+    FORGE_TYPE_VOID, FORGE_TYPE_I1, FORGE_TYPE_I8, FORGE_TYPE_I16, FORGE_TYPE_I32,
+    FORGE_TYPE_I64, FORGE_TYPE_F32, FORGE_TYPE_F64, FORGE_TYPE_PTR
+} forge_type_kind_t;
+
+typedef enum forge_diagnostic_severity {
+    FORGE_DIAGNOSTIC_NOTE,
+    FORGE_DIAGNOSTIC_WARNING,
+    FORGE_DIAGNOSTIC_ERROR
+} forge_diagnostic_severity_t;
+
+typedef enum forge_opcode {
+    FORGE_OPCODE_ADD, FORGE_OPCODE_SUBTRACT, FORGE_OPCODE_MULTIPLY,
+    FORGE_OPCODE_DIVIDE_SIGNED, FORGE_OPCODE_DIVIDE_UNSIGNED,
+    FORGE_OPCODE_REMAINDER_SIGNED, FORGE_OPCODE_REMAINDER_UNSIGNED,
+    FORGE_OPCODE_AND, FORGE_OPCODE_OR, FORGE_OPCODE_XOR,
+    FORGE_OPCODE_SHIFT_LEFT, FORGE_OPCODE_SHIFT_RIGHT_SIGNED, FORGE_OPCODE_SHIFT_RIGHT_UNSIGNED,
+    FORGE_OPCODE_COMPARE_EQUAL, FORGE_OPCODE_COMPARE_NOT_EQUAL,
+    FORGE_OPCODE_COMPARE_LESS_SIGNED, FORGE_OPCODE_COMPARE_LESS_UNSIGNED,
+    FORGE_OPCODE_COMPARE_LESS_EQUAL_SIGNED, FORGE_OPCODE_COMPARE_LESS_EQUAL_UNSIGNED
+} forge_opcode_t;
+
+forge_context_t* forge_context_create(void);
+void forge_context_destroy(forge_context_t* context);
+forge_module_t* forge_module_create(forge_context_t* context, const char* name);
+void forge_module_destroy(forge_module_t* module);
+forge_function_t* forge_function_create(forge_module_t* module, const char* name,
+                                        forge_type_kind_t return_type,
+                                        const forge_type_kind_t* parameter_types,
+                                        size_t parameter_count);
+void forge_function_destroy(forge_function_t* function);
+forge_block_t* forge_block_create(forge_function_t* function, const char* name);
+forge_block_t* forge_block_create_with_parameters(forge_function_t* function, const char* name,
+                                                   const forge_type_kind_t* parameter_types,
+                                                   size_t parameter_count);
+void forge_block_destroy(forge_block_t* block);
+forge_builder_t* forge_builder_create(forge_context_t* context, forge_module_t* module);
+void forge_builder_destroy(forge_builder_t* builder);
+void forge_builder_position_at_end(forge_builder_t* builder, forge_block_t* block);
+void forge_builder_clear_insertion_point(forge_builder_t* builder);
+void forge_builder_set_source_location(forge_builder_t* builder, const char* file,
+                                       uint32_t line, uint32_t column);
+void forge_builder_set_source_range(forge_builder_t* builder, const char* file,
+                                    uint32_t line, uint32_t column,
+                                    uint32_t end_line, uint32_t end_column);
+void forge_builder_clear_source_location(forge_builder_t* builder);
+void forge_module_set_metadata(forge_module_t* module, const char* name, const char* value);
+const char* forge_module_get_metadata(const forge_module_t* module, const char* name);
+void forge_builder_set_next_attribute(forge_builder_t* builder, const char* name, const char* value);
+void forge_builder_clear_next_attributes(forge_builder_t* builder);
+const char* forge_function_parameter(const forge_function_t* function, size_t index);
+const char* forge_block_parameter(const forge_block_t* block, size_t index);
+const char* forge_builder_constant(forge_builder_t* builder, forge_type_kind_t type,
+                                   const char* literal);
+const char* forge_builder_binary(forge_builder_t* builder, forge_opcode_t opcode,
+                                 forge_type_kind_t type, const char* lhs, const char* rhs);
+const char* forge_builder_compare(forge_builder_t* builder, forge_opcode_t opcode,
+                                  forge_type_kind_t operand_type, const char* lhs, const char* rhs);
+const char* forge_builder_stack_alloc(forge_builder_t* builder, uint64_t size, uint32_t alignment);
+const char* forge_builder_load(forge_builder_t* builder, forge_type_kind_t type,
+                               const char* address, uint32_t alignment);
+void forge_builder_store(forge_builder_t* builder, forge_type_kind_t type,
+                         const char* value, const char* address, uint32_t alignment);
+const char* forge_builder_call(forge_builder_t* builder, forge_type_kind_t return_type,
+                               const char* callee, const char* const* arguments,
+                               size_t argument_count);
+void forge_builder_jump(forge_builder_t* builder, const forge_block_t* destination,
+                        const char* const* arguments, size_t argument_count);
+void forge_builder_branch(forge_builder_t* builder, const char* condition,
+                          const forge_block_t* true_destination,
+                          const forge_block_t* false_destination);
+void forge_builder_return(forge_builder_t* builder, const char* value);
+void forge_builder_unreachable(forge_builder_t* builder);
+int forge_module_verify(const forge_module_t* module, char* message, size_t message_capacity);
+size_t forge_module_diagnostic_count(const forge_module_t* module);
+forge_diagnostic_severity_t forge_module_diagnostic_severity(const forge_module_t* module, size_t index);
+const char* forge_module_diagnostic_message(const forge_module_t* module, size_t index);
+const char* forge_module_diagnostic_file(const forge_module_t* module, size_t index);
+uint32_t forge_module_diagnostic_line(const forge_module_t* module, size_t index);
+uint32_t forge_module_diagnostic_column(const forge_module_t* module, size_t index);
+uint32_t forge_module_diagnostic_end_line(const forge_module_t* module, size_t index);
+uint32_t forge_module_diagnostic_end_column(const forge_module_t* module, size_t index);
+int forge_builder_has_insertion_point(const forge_builder_t* builder);
+int forge_builder_insertion_block_terminated(const forge_builder_t* builder);
+size_t forge_module_print(const forge_module_t* module, char* output, size_t output_capacity);
+size_t forge_module_source_map_json(const forge_module_t* module, char* output, size_t output_capacity);
+size_t forge_module_semantic_fingerprint(const forge_module_t* module, char* output, size_t output_capacity);
+size_t forge_module_frontend_fingerprint(const forge_module_t* module, char* output, size_t output_capacity);
+size_t forge_module_incremental_manifest_json(const forge_module_t* module, char* output, size_t output_capacity);
+size_t forge_module_cache_key(const forge_module_t* module, const char* frontend_id,
+                              const char* configuration, char* output, size_t output_capacity);
+size_t forge_module_incremental_build_plan_json(const forge_module_t* previous_module,
+                                                const forge_module_t* current_module,
+                                                const char* frontend_id,
+                                                const char* configuration,
+                                                char* output, size_t output_capacity);
+size_t forge_module_parallel_build_schedule_json(const forge_module_t* previous_module,
+                                                const forge_module_t* current_module,
+                                                const char* frontend_id,
+                                                const char* configuration,
+                                                size_t requested_workers,
+                                                char* output, size_t output_capacity);
+size_t forge_module_dependency_build_schedule_json(const forge_module_t* previous_module,
+                                                  const forge_module_t* current_module,
+                                                  const char* frontend_id,
+                                                  const char* configuration,
+                                                  size_t requested_workers,
+                                                  char* output, size_t output_capacity);
+const char* forge_last_error(void);
+void forge_clear_error(void);
+
+#ifdef __cplusplus
+}
+#endif
+#endif
