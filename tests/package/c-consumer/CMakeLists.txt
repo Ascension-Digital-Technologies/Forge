@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(ForgeCConsumer LANGUAGES C CXX)
-find_package(Forge 4.0 CONFIG REQUIRED)
+find_package(Forge 1.0 CONFIG REQUIRED)
 add_executable(forge-c-consumer main.c)
 target_link_libraries(forge-c-consumer PRIVATE Forge::forge)
 set_target_properties(forge-c-consumer PROPERTIES LINKER_LANGUAGE CXX)

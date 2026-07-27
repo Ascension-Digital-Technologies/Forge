@@ -49,7 +49,7 @@ if(NOT run_result EQUAL 0)
   message(FATAL_ERROR "Forge consumer failed: ${run_result}")
 endif()
 string(STRIP "${output}" output)
-if(NOT output STREQUAL "4.0.0")
+if(NOT output STREQUAL "1.0.0")
   message(FATAL_ERROR "Unexpected installed Forge version: ${output}")
 endif()
 

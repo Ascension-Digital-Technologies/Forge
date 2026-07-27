@@ -1,83 +1,68 @@
+<div align="center">
+
 # Forge
 
-**A verified, deterministic compiler core and x86-64 backend for building language frontends.**
+**A verified compiler infrastructure toolkit for building native language frontends.**
 
-Forge provides a compact SSA intermediate representation, verification and optimization pipelines, an interpreter, an x86-64 JIT/backend, deterministic ELF64 and COFF object emission, and a frontend SDK for C++ and C. It is designed for language implementers who want a smaller, auditable compiler foundation without giving up strict correctness boundaries, native code generation, or incremental builds.
+[![Release](https://img.shields.io/badge/release-1.0.0-2563eb)](CHANGELOG.md)
+[![C++](https://img.shields.io/badge/C%2B%2B-20-00599c)](CMakeLists.txt)
+[![License](https://img.shields.io/badge/license-Apache--2.0-16a34a)](LICENSE)
+[![C API](https://img.shields.io/badge/C%20API-v9-7c3aed)](include/forge-c/forge.h)
+[![Target](https://img.shields.io/badge/target-x86--64-334155)](#platform-support)
 
-> **Release:** 4.0.0  
-> **License:** Apache-2.0  
-> **Public C API:** v9
+Forge provides typed SSA IR, verification, optimization pipelines, an interpreter, an x86-64 JIT and native backend, deterministic ELF/COFF output, and frontend SDKs for C++ and C.
 
-## Why Forge
+[Quick start](#quick-start) · [Frontend guide](docs/building-a-language.md) · [Architecture](docs/architecture.md) · [Contributing](CONTRIBUTING.md)
 
-- **Verified at every boundary.** Parsed IR, decoded binary IR, optimized IR, lowered machine IR, and machine transformations are validated before execution or object generation.
-- **Deterministic by design.** Canonical IR, optimization output, incremental manifests, ELF objects, and COFF objects are covered by reproducibility tests.
-- **Frontend-friendly.** A typed C++ builder, stable handles, source ranges, structured diagnostics, metadata, source maps, and an opaque C API make Forge practical from C++, C, Rust, Zig, Dash, Python extensions, and other FFI-capable languages.
-- **Native and incremental.** Forge can cache encoded functions, rebuild dependency-affected callers only, assemble deterministic native objects, and cache final linked executables.
-- **Reference-model testing.** The interpreter is used as the semantic reference for JIT differential testing.
+</div>
 
-## Capabilities
+---
 
-### IR and frontend SDK
+## Overview
 
-- Typed SSA IR with block arguments, globals, calls, callbacks, aggregates, and ownership-aware verification
-- Canonical textual IR and versioned little-endian binary IR
-- Typed `forge::ir::Opcode` values and ergonomic `IRBuilder`
-- Automatic SSA naming and stable index-backed function/block handles
-- Full source ranges and structured diagnostics
-- Namespaced module metadata and per-operation frontend attributes
-- Deterministic JSON source maps
-- Opaque, versioned C API in `<forge-c/forge.h>`
+Forge is a compact compiler core intended for language implementers who want a native backend without adopting a very large compiler framework. A frontend performs parsing, semantic analysis, and type checking, then lowers into verified Forge IR.
 
-### Optimization and execution
+```text
+Source language
+      │
+      ▼
+Parser · resolver · type checker
+      │
+      ▼
+Forge C++ SDK or C API
+      │
+      ▼
+Verified SSA IR
+      ├──────────────► Interpreter
+      ▼
+Optimization pipeline
+      ▼
+Machine IR · allocation · x86-64 encoding
+      ├──────────────► JIT
+      └──────────────► ELF64 / COFF object files
+```
 
-- Verified optimization levels: `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, and `-Oz`
-- Shared machine liveness, global dead-code elimination, CFG cleanup, copy propagation, and block layout
-- Interpreter, x86-64 JIT, and differential execution mode
-- Per-pass statistics and timing
+### Highlights
 
-### x86-64 backend
+| Area | Capabilities |
+|---|---|
+| **Frontend SDK** | Typed builder, stable handles, source ranges, diagnostics, metadata, source maps, opaque C API |
+| **IR** | Typed SSA, block arguments, globals, calls, aggregates, canonical text, binary serialization |
+| **Optimization** | `-O0` through `-O3`, `-Os`, `-Oz`, liveness, DCE, CFG cleanup, copy propagation, pass reports |
+| **Execution** | Reference interpreter, x86-64 JIT, runtime bindings, interpreter/JIT differential tests |
+| **Native output** | System V and Windows x64 lowering, deterministic ELF64 and COFF AMD64 objects |
+| **Incremental builds** | Fingerprints, dependency invalidation, parallel scheduling, cached functions, object and executable caching |
 
-- System V AMD64 and Windows x64 scalar/pointer calling conventions
-- Integer and floating-point code generation
-- Call-aware register allocation and spill-slot reuse
-- Spill caching, dead-store elimination, rematerialization, immediate selection, memory-operand folding, compare/branch fusion, compact branches, and leaf-frame omission
-- Deterministic ELF64 and COFF AMD64 relocatable objects
+## Quick start
 
-### Incremental builds
-
-- Semantic and frontend SHA-256 fingerprints
-- Per-function change detection and dependency invalidation
-- Deterministic parallel build scheduling
-- Atomic artifact cache storage
-- Cached encoded-function artifacts with unresolved fixups
-- Deterministic incremental ELF/COFF assembly
-- Cache-aware native linking and final executable reuse
-
-## Requirements
+### Requirements
 
 - CMake 3.21 or newer
 - A C++20 compiler
-- Ninja for the checked-in presets
-- An x86-64 host for JIT execution tests
+- Ninja when using the checked-in presets
+- An x86-64 host for JIT tests
 
-Linux and Windows are exercised in CI. Native ELF link-and-run validation is performed on Linux; COFF object generation is validated on supported CI platforms.
-
-## Build
-
-Run the complete strict release gate:
-
-```sh
-./scripts/release-gate.sh
-```
-
-PowerShell:
-
-```powershell
-.\scripts\release-gate.ps1
-```
-
-Manual preset workflow:
+### Build
 
 ```sh
 cmake --preset release-strict
@@ -85,29 +70,63 @@ cmake --build --preset release-strict
 ctest --preset release-strict
 ```
 
-Run the complete ASan/UBSan gate on supported Unix toolchains:
+Windows PowerShell:
+
+```powershell
+.\scripts\release-gate.ps1
+```
+
+Unix release gate:
+
+```sh
+./scripts/release-gate.sh
+```
+
+Sanitizer gate on supported Unix toolchains:
 
 ```sh
 ./scripts/sanitizer-gate.sh
 ```
 
-## Command-line tools
+### Command-line examples
+
+```sh
+# Verify textual IR
+forge verify examples/native-i64.fir
+
+# Optimize and inspect pass statistics
+forge-opt examples/optimization.fir -O3 --stats --pass-timing
+
+# Emit an ELF object
+forge compile examples/native-i64.fir -O2 --format=elf -o native.o
+
+# Compare interpreter and JIT results
+forge-run --engine=compare examples/interpreter.fir factorial 10
+```
+
+## Tools
 
 | Tool | Purpose |
 |---|---|
 | `forge` | Verify, optimize, and compile Forge IR |
 | `forge-as` | Assemble textual IR into binary IR |
 | `forge-dis` | Disassemble binary IR into canonical text |
-| `forge-opt` | Run the verified optimization pipeline |
-| `forge-codegen` | Inspect lowering, allocation, encoding, and metrics |
-| `forge-run` | Execute through the interpreter, JIT, or differential mode |
+| `forge-opt` | Run optimization pipelines and report pass statistics |
+| `forge-codegen` | Inspect lowering, allocation, encoding, and backend metrics |
+| `forge-run` | Execute through the interpreter, JIT, or differential engine |
 
-```sh
-forge verify examples/native-i64.fir
-forge-opt examples/optimization.fir -O3 --stats --pass-timing
-forge compile examples/native-i64.fir -O2 --format=elf -o native.o
-forge-run --engine=compare examples/interpreter.fir factorial 10
-```
+Optimization levels:
+
+| Level | Intent |
+|---|---|
+| `-O0` | Minimal transformation and maximum IR fidelity |
+| `-O1` | Low-cost cleanup |
+| `-O2` | Standard production optimization |
+| `-O3` | Aggressive optimization |
+| `-Os` | Optimize for size |
+| `-Oz` | Minimize code size |
+
+See [docs/cli.md](docs/cli.md) for command details.
 
 ## Build a frontend
 
@@ -115,7 +134,6 @@ forge-run --engine=compare examples/interpreter.fir factorial 10
 
 ```cpp
 #include <forge/ir/builder.hpp>
-#include <forge/ir/verifier.hpp>
 
 forge::ir::Context context;
 auto& module = context.create_module("example");
@@ -131,7 +149,7 @@ auto function = builder.create_function_handle(
 auto entry = builder.create_block_handle(function, "entry");
 
 builder.position_at_end(entry);
-builder.set_source_range("main.ds", 1, 1, 1, 15);
+builder.set_source_range("main.lang", 1, 1, 1, 15);
 auto result = builder.create_add(
     forge::ir::i64_type(), "%left", "%right");
 builder.create_return(result);
@@ -139,19 +157,61 @@ builder.create_return(result);
 const auto diagnostics = builder.verify();
 ```
 
-See [`docs/building-a-language.md`](docs/building-a-language.md), [`examples/frontend/tiny_frontend.cpp`](examples/frontend/tiny_frontend.cpp), and the standalone template in [`examples/frontend/template/`](examples/frontend/template/).
-
-### C and other FFI languages
-
-The opaque C API is installed as:
+### C and FFI
 
 ```c
 #include <forge-c/forge.h>
+
+#if FORGE_C_API_VERSION != 9
+#error "Unsupported Forge C API version"
+#endif
 ```
 
-It supports module/function/block construction, CFG and memory operations, diagnostics, source ranges, metadata, source maps, incremental manifests, build plans, and dependency-aware schedules. The current public API version is `FORGE_C_API_VERSION == 9`.
+The opaque C API is suitable for Rust, Zig, Go, C#, Python extensions, Dash, and other languages with C FFI support.
 
-## Incremental native pipeline
+Start with:
+
+- [Building a language with Forge](docs/building-a-language.md)
+- [Tiny frontend example](examples/frontend/tiny_frontend.cpp)
+- [Standalone frontend template](examples/frontend/template/)
+
+## Native backend
+
+The x86-64 backend includes:
+
+- System V AMD64 and Windows x64 scalar/pointer calling conventions
+- Integer and scalar floating-point lowering
+- Call-aware register allocation and reusable spill slots
+- Spill caching, dead-store elimination, and rematerialization
+- Immediate, memory-source, and address-mode instruction selection
+- Compare/branch fusion and fallthrough-aware block layout
+- Short branch relaxation and frameless leaf functions
+- Deterministic ELF64 and COFF AMD64 object emission
+
+The interpreter is the semantic reference implementation. Native behavior is checked through differential tests.
+
+## Incremental native builds
+
+Forge can rebuild dependency-affected functions only, reuse encoded native artifacts, assemble deterministic objects, and restore final executables from cache.
+
+```text
+Previous snapshot ─┐
+                   ├─► dependency-aware build plan
+Current module ────┘              │
+                                  ▼
+                        parallel function builds
+                                  │
+                     ┌────────────┴────────────┐
+                     ▼                         ▼
+               artifact cache            cache hits
+                     └────────────┬────────────┘
+                                  ▼
+                     deterministic ELF / COFF
+                                  ▼
+                       cache-aware native link
+```
+
+Public headers:
 
 ```cpp
 #include <forge/ir/artifact_cache.hpp>
@@ -159,17 +219,6 @@ It supports module/function/block construction, CFG and memory operations, diagn
 #include <forge/object/incremental.hpp>
 #include <forge/object/native_link.hpp>
 ```
-
-A frontend can:
-
-1. Fingerprint the current and previous modules.
-2. Build a dependency-aware selective rebuild plan.
-3. Compile only changed or invalidated functions.
-4. Reuse encoded function artifacts from the cache.
-5. Assemble deterministic ELF64 or COFF objects.
-6. Link only when the final binary cache key misses.
-
-Production link integrations should set a stable toolchain identity, such as `clang-22.1.0+lld-22.1.0`, so linker upgrades invalidate incompatible final binaries.
 
 ## Install and consume
 
@@ -182,47 +231,30 @@ cmake --install build/release-strict --prefix "$PWD/_install"
 Consumer project:
 
 ```cmake
-find_package(Forge 4.0 CONFIG REQUIRED)
+find_package(Forge 1.0 CONFIG REQUIRED)
 target_link_libraries(my_compiler PRIVATE Forge::forge)
 ```
 
-The release matrix installs Forge into an isolated prefix and builds and runs separate C and C++ consumers against the installed package.
+The release matrix installs Forge into an isolated prefix and builds independent C and C++ consumers against the installed package.
 
-## Repository layout
+## Platform support
 
-```text
-include/forge/       Public C++ API
-include/forge-c/     Stable opaque C API
-src/                 Compiler implementation
-tools/               Command-line tools
-tests/               Unit, differential, ABI, object, fuzz, and quality tests
-examples/            Verified IR examples and frontend samples
-docs/                Architecture, backend, frontend, and release documentation
-cmake/               Installed CMake package support
-scripts/             Reproducible release and sanitizer gates
-.github/workflows/   CI and release packaging
-```
+| Capability | Linux x86-64 | Windows x86-64 |
+|---|:---:|:---:|
+| Compiler and SDK | ✅ | ✅ |
+| Interpreter | ✅ | ✅ |
+| Native JIT | ✅ | ✅ |
+| System V ABI | ✅ | — |
+| Windows x64 ABI | — | ✅ |
+| ELF64 objects | ✅ | Generated and validated |
+| COFF AMD64 objects | Generated and validated | ✅ |
+| ASan + UBSan release gate | ✅ | Toolchain-dependent |
 
-## Release quality
+## Project status and boundaries
 
-Every release must preserve:
+Forge 1.0.0 is the first stable public release of the documented compiler-core and x86-64 scalar/pointer feature set.
 
-- Warnings-as-errors builds
-- The complete CTest matrix
-- ASan/UBSan and leak-detection cleanliness
-- Parser and binary fuzz-smoke coverage
-- Verification of every checked-in `.fir` example
-- Deterministic optimization output and native objects
-- Native link-and-execute validation
-- Installed C and C++ package-consumer compatibility
-- Exact backend code-quality ceilings
-- Repository hygiene checks
-
-See [`docs/release-readiness.md`](docs/release-readiness.md) for the complete contract.
-
-## Supported boundaries
-
-Forge 4.0.0 is production-ready for its documented compiler-core and x86-64 scalar/pointer feature set. The following remain intentionally outside the supported surface:
+The following are not currently part of the supported surface:
 
 - Native by-value aggregate ABI classification
 - True variadic function definitions
@@ -230,17 +262,41 @@ Forge 4.0.0 is production-ready for its documented compiler-core and x86-64 scal
 - Segmented live-range register allocation
 - Architectures other than x86-64
 
-These limitations are explicit and are not represented as completed features.
+See [docs/release-readiness.md](docs/release-readiness.md) for the release contract and [docs/roadmap.md](docs/roadmap.md) for planned work.
+
+## Repository layout
+
+```text
+include/forge/       Public C++ SDK
+include/forge-c/     Stable opaque C API
+src/                 Compiler implementation
+tools/               Command-line tools
+tests/               Unit, differential, ABI, object, fuzz, and quality tests
+examples/            IR examples and frontend samples
+docs/                Architecture, API, backend, and release documentation
+cmake/               Installed CMake package support
+scripts/             Reproducible release and sanitizer gates
+.github/workflows/   CI and release packaging
+```
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Backend](docs/backend.md)
-- [Building a language](docs/building-a-language.md)
-- [Release readiness](docs/release-readiness.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-- [Changelog](CHANGELOG.md)
+| Document | Purpose |
+|---|---|
+| [Architecture](docs/architecture.md) | Pipeline, subsystem responsibilities, and invariants |
+| [IR reference](docs/ir-reference.md) | Core IR concepts and verification rules |
+| [Backend](docs/backend.md) | Machine IR, allocation, ABI, encoding, and objects |
+| [CLI reference](docs/cli.md) | Command-line tools and optimization levels |
+| [Building a language](docs/building-a-language.md) | C++ SDK and C API integration |
+| [Release readiness](docs/release-readiness.md) | Supported production contract and release gates |
+| [Roadmap](docs/roadmap.md) | Planned compiler work |
+| [Contributing](CONTRIBUTING.md) | Development workflow and contribution standards |
+| [Security](SECURITY.md) | Vulnerability reporting policy |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community participation expectations |
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Changes must preserve deterministic output, verification boundaries, and the interpreter/JIT differential contract.
 
 ## License
 
