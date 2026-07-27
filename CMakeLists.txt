@@ -155,6 +155,13 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
   -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
   -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
   -DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}
+  -DPARENT_GENERATOR=${CMAKE_GENERATOR}
+  -DPARENT_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}
+  -DPARENT_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}
+  -DPARENT_C_COMPILER=${CMAKE_C_COMPILER}
+  -DPARENT_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+  -DPARENT_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+  -DPARENT_CONFIG=$<CONFIG>
   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package/check_install_consumer.cmake)
  if(UNIX AND NOT APPLE)
   add_test(NAME forge-native-link-workflow COMMAND ${CMAKE_COMMAND}
@@ -264,7 +271,11 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
   -DMAX_ENCODED_BYTES=60
   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen/check_floating_compare.cmake)
  add_test(NAME forge-driver-compile COMMAND forge-cli compile ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir -o ${CMAKE_CURRENT_BINARY_DIR}/forge-driver-test.o)
- set_tests_properties(forge-driver-compile PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted ELF64 object")
+ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  set_tests_properties(forge-driver-compile PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted COFF AMD64 object")
+ else()
+  set_tests_properties(forge-driver-compile PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted ELF64 object")
+ endif()
  add_test(NAME forge-driver-compile-coff COMMAND forge-cli compile ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir --format=coff -o ${CMAKE_CURRENT_BINARY_DIR}/forge-driver-test.obj)
  set_tests_properties(forge-driver-compile-coff PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted COFF AMD64 object")
  add_test(NAME forge-driver-version COMMAND forge-cli version)
