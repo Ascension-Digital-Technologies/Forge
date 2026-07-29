@@ -693,9 +693,10 @@ entry:
         encoded_pressure.name = "encoded_pressure";
         // Keep enough simultaneously live values to exercise spill encoding
         // with the full nine-register integer pool.
-        encoded_pressure.argument_count = 3;
-        encoded_pressure.argument_widths.assign(3, 8);
-        encoded_pressure.argument_classes.assign(3, forge::machine::RegisterClass::integer);
+        // This fixture exercises register pressure using immediates only. Do not
+        // declare unused ABI arguments: on Windows an unconsumed third argument
+        // lives in r8 and correctly requires an encoder capture area, which would
+        // make this allocator-frame metric test ABI-dependent.
         encoded_pressure.register_count = 19;
         encoded_pressure.register_widths.assign(19, 8);
         encoded_pressure.register_classes.assign(19, forge::machine::RegisterClass::integer);
