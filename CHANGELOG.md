@@ -1,11 +1,40 @@
-## 2.0.0 - 2026-07-27
-
-- Cleaned the repository root by removing generated duplicate Forge IR fixtures; canonical examples now live exclusively under `examples/`.
-- Unified production driver commands: `forge inspect`, `forge explain`, and `forge doctor`.
-- Sanitizer gate separates JIT execution from sanitizer-safe compiler-core coverage.
-- Finalized aggregate ABI parameters and returns, allocator closure, frontend SDK, native libraries, and deterministic release workflows.
-
 # Changelog
+
+All notable changes to Forge are documented here. Forge follows [Semantic Versioning](https://semver.org/).
+
+## 2.0.0 - 2026-07-29
+
+### Compiler and optimizer
+
+- Added bounded scalar-cleanup fixpoint iteration at `-O2` and `-O3`.
+- Added loop-capable mem2reg, cross-block scalar promotion, global load forwarding, and local/global alias-aware dead-store elimination.
+- Added generalized scalar-evolution reduction, conservative constant-trip unrolling, LICM hardening, merge-parameter simplification, and SSA diamond if-conversion.
+- Added dominance-aware and commutative CSE, predicate canonicalization, address-expression CSE, extended algebraic identities, and power-of-two unsigned division/remainder strength reduction.
+- Added broad x86 multiplication strength reduction for powers of two and scaled `LEA` families.
+
+### Backend and register allocation
+
+- Expanded integer allocation to nine registers with ABI-safe entry capture and selective callee-saved use.
+- Added cycle-correct shared parallel-copy scheduling for SSA edges, function entry, and outgoing integer/XMM call arguments.
+- Added loop-edge affinity, destructive induction coalescing, direct physical copies, `xchg` swap lowering, hot-loop layout, and arithmetic-flags branch fusion.
+- Added direct arithmetic, compare, `TEST`, `CMOV`, immediate, stack-memory, and return-value lowering improvements.
+- Added frameless call-containing functions when no frame-resident data is required.
+
+### Calls and floating point
+
+- Removed blanket integer and floating argument snapshots in favor of cycle-safe ABI placement.
+- Kept floating call arguments register-resident when they do not cross calls.
+- Added direct call-return forwarding and call-result forwarding into arithmetic and subsequent calls for integer and floating values.
+- Added register-resident floating entry arguments and direct XMM constant materialization.
+
+### Correctness, validation, and release engineering
+
+- Fixed LICM terminator corruption, multi-register parallel-copy rotation, destructive recurrence coalescing, comparison-CSE typing, and XMM entry hazards.
+- Fixed Clang/MSVC Windows test-build portability by including `<algorithm>` explicitly where standard algorithms are used.
+- Expanded differential performance coverage to 16 independent Forge-versus-LLVM workload families with semantic checks, code-size accounting, and unchanged per-kernel gates.
+- Added strict 66-test release validation, sanitizer-safe gates, deterministic ELF/COFF coverage, installed C/C++ consumer gates, and package checksums.
+- Unified production driver commands: `forge inspect`, `forge explain`, and `forge doctor`.
+- Finalized native aggregate ABI parameters and returns for System V AMD64 and Windows x64.
 
 ## 1.10.0 - 2026-07-27
 

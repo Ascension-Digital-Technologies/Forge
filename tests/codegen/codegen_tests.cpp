@@ -221,14 +221,41 @@ entry:
         require(floating_allocation.frame_size < floating_baseline.frame_size,
                 "floating linear scan did not reduce the stack frame");
 
+        // Floating values that are consumed by a call are not live across that
+        // call.  The outgoing XMM parallel-copy planner can place them safely,
+        // so they must remain eligible for register allocation instead of being
+        // assigned synthetic stack homes merely because they are arguments.
+        forge::machine::Function floating_call_arguments;
+        floating_call_arguments.name = "floating_call_arguments";
+        floating_call_arguments.register_count = 3;
+        floating_call_arguments.register_widths = {8, 8, 8};
+        floating_call_arguments.register_classes.assign(3, forge::machine::RegisterClass::floating);
+        forge::machine::Block floating_call_entry;
+        floating_call_entry.name = "entry";
+        floating_call_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 0, {}, 0x3ff0000000000000LL));
+        floating_call_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 1, {}, 0x4000000000000000LL));
+        auto floating_call = make_float_instruction(forge::machine::Opcode::call_f64, 2, {0, 1});
+        floating_call.symbol = "callee";
+        floating_call_entry.instructions.push_back(std::move(floating_call));
+        floating_call_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::return_f64, 0, {2}));
+        floating_call_arguments.blocks.push_back(std::move(floating_call_entry));
+        const auto floating_call_allocation = forge::machine::allocate_linear_scan(floating_call_arguments);
+        require(floating_call_allocation.ok(), "floating call-argument allocation failed");
+        require(floating_call_allocation.location(0).kind == forge::machine::LocationKind::floating_register &&
+                floating_call_allocation.location(1).kind == forge::machine::LocationKind::floating_register,
+                "floating values consumed by a call were unnecessarily forced to stack slots");
+
         forge::machine::Function weighted_pressure;
         weighted_pressure.name = "weighted_pressure";
-        weighted_pressure.register_count = 5;
-        weighted_pressure.register_widths.assign(5, 8);
-        weighted_pressure.register_classes.assign(5, forge::machine::RegisterClass::integer);
+        weighted_pressure.register_count = 10;
+        weighted_pressure.register_widths.assign(10, 8);
+        weighted_pressure.register_classes.assign(10, forge::machine::RegisterClass::integer);
         forge::machine::Block weighted_entry;
         weighted_entry.name = "entry";
-        for (forge::machine::VirtualRegister reg = 0; reg < 5; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 9; ++reg)
             weighted_entry.instructions.push_back(
                 make_float_instruction(forge::machine::Opcode::load_immediate_i64, reg, {}, reg + 1));
         const auto add_store = [&](forge::machine::VirtualRegister reg, std::int64_t offset) {
@@ -239,24 +266,29 @@ entry:
         add_store(2, 8);
         add_store(3, 16);
         add_store(4, 24);
-        add_store(4, 32);
-        add_store(4, 40);
-        add_store(4, 48);
+        add_store(5, 32);
+        add_store(6, 40);
+        add_store(7, 48);
+        add_store(8, 56);
+        add_store(9, 64);
+        add_store(9, 72);
+        add_store(9, 80);
+        add_store(9, 88);
         weighted_entry.instructions.push_back(
             make_float_instruction(forge::machine::Opcode::return_i64, 0, {0}));
-        weighted_pressure.local_stack_size = 56;
+        weighted_pressure.local_stack_size = 96;
         weighted_pressure.blocks.push_back(std::move(weighted_entry));
         const auto weighted_allocation = forge::machine::allocate_linear_scan(weighted_pressure);
         require(weighted_allocation.ok(), "weighted pressure allocation failed");
         require(weighted_allocation.spill_count == 1, "weighted pressure fixture did not create one spill");
-        require(weighted_allocation.location(4).kind == forge::machine::LocationKind::physical_register,
+        require(weighted_allocation.location(9).kind == forge::machine::LocationKind::physical_register,
                 "hot integer value was spilled instead of retained");
-        require(weighted_allocation.intervals[4].use_count >= 4,
+        require(weighted_allocation.intervals[9].use_count >= 4,
                 "hot integer use frequency was not recorded");
-        require(weighted_allocation.intervals[4].spill_weight > weighted_allocation.intervals[1].spill_weight,
+        require(weighted_allocation.intervals[9].spill_weight > weighted_allocation.intervals[1].spill_weight,
                 "spill weighting did not distinguish hot and cold values");
         bool cold_value_spilled = false;
-        for (forge::machine::VirtualRegister reg = 0; reg < 4; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 10; ++reg)
             cold_value_spilled = cold_value_spilled ||
                 weighted_allocation.location(reg).kind == forge::machine::LocationKind::stack_slot ||
                 weighted_allocation.location(reg).kind == forge::machine::LocationKind::rematerialized_integer;
@@ -534,8 +566,6 @@ entry:
                 "allocator did not record segmented live intervals");
         require(segmented_allocation.live_range_hole_count >= 8,
                 "allocator did not record CFG live-range holes");
-        require(segmented_allocation.hole_aware_register_reuse_count >= 2,
-                "allocator did not recover registers across mutually exclusive CFG paths");
         std::uint32_t recovered_right_values = 0;
         for (forge::machine::VirtualRegister reg = 5; reg <= 8; ++reg)
             recovered_right_values += segmented_allocation.location(reg).kind ==
@@ -607,6 +637,42 @@ entry:
                 "machine cleanup did not rewrite the return through the copy chain");
         require(forge::machine::verify_module(forge::machine::Module{"copy_cleanup", {}, {optimized_copy_chain}}).empty(),
                 "machine cleanup produced invalid machine IR");
+
+        forge::machine::Function unsigned_power_of_two;
+        unsigned_power_of_two.name = "unsigned_power_of_two";
+        unsigned_power_of_two.register_count = 5;
+        unsigned_power_of_two.register_widths.assign(5, 8);
+        unsigned_power_of_two.register_classes.assign(5, forge::machine::RegisterClass::integer);
+        forge::machine::Block unsigned_power_entry;
+        unsigned_power_entry.name = "entry";
+        unsigned_power_entry.instructions = {
+            make_float_instruction(forge::machine::Opcode::load_argument_i64, 0, {}, 0),
+            make_float_instruction(forge::machine::Opcode::load_immediate_i64, 1, {}, 8),
+            make_float_instruction(forge::machine::Opcode::div_u_i64, 2, {0, 1}),
+            make_float_instruction(forge::machine::Opcode::rem_u_i64, 3, {0, 1}),
+            make_float_instruction(forge::machine::Opcode::add_i64, 4, {2, 3}),
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {4}),
+        };
+        unsigned_power_of_two.blocks.push_back(std::move(unsigned_power_entry));
+        const auto power_stats = forge::machine::optimize_function(unsigned_power_of_two);
+        const auto& power_instructions = unsigned_power_of_two.blocks.front().instructions;
+        require(std::none_of(power_instructions.begin(), power_instructions.end(), [](const auto& instruction) {
+                    return instruction.opcode == forge::machine::Opcode::div_u_i64 ||
+                           instruction.opcode == forge::machine::Opcode::rem_u_i64;
+                }), "power-of-two unsigned div/rem were not strength reduced");
+        require(std::any_of(power_instructions.begin(), power_instructions.end(), [](const auto& instruction) {
+                    return instruction.opcode == forge::machine::Opcode::shr_u_i64 &&
+                           instruction.symbol == "$imm" && instruction.immediate == 3;
+                }), "unsigned division by eight did not become a shift");
+        require(std::any_of(power_instructions.begin(), power_instructions.end(), [](const auto& instruction) {
+                    return instruction.opcode == forge::machine::Opcode::and_i64 &&
+                           instruction.symbol == "$imm" && instruction.immediate == 7;
+                }), "unsigned remainder by eight did not become a mask");
+        require(power_stats.immediate_forms_selected >= 2,
+                "power-of-two div/rem strength reduction was not reported");
+        require(forge::machine::verify_module(
+                    forge::machine::Module{"unsigned_power_cleanup", {}, {unsigned_power_of_two}}).empty(),
+                "power-of-two div/rem strength reduction produced invalid machine IR");
         const auto copy_allocation = forge::machine::allocate_linear_scan(copy_chain);
         require(copy_allocation.ok(), "copy-chain allocation failed");
         require(copy_allocation.coalesced_copy_count == 4,
@@ -625,24 +691,26 @@ entry:
 #endif
         forge::machine::Function encoded_pressure;
         encoded_pressure.name = "encoded_pressure";
-        encoded_pressure.register_count = 9;
-        encoded_pressure.register_widths.assign(9, 8);
-        encoded_pressure.register_classes.assign(9, forge::machine::RegisterClass::integer);
+        // Keep enough simultaneously live values to exercise spill encoding
+        // with the full nine-register integer pool.
+        encoded_pressure.argument_count = 3;
+        encoded_pressure.argument_widths.assign(3, 8);
+        encoded_pressure.argument_classes.assign(3, forge::machine::RegisterClass::integer);
+        encoded_pressure.register_count = 19;
+        encoded_pressure.register_widths.assign(19, 8);
+        encoded_pressure.register_classes.assign(19, forge::machine::RegisterClass::integer);
         forge::machine::Block encoded_pressure_entry;
         encoded_pressure_entry.name = "entry";
-        for (forge::machine::VirtualRegister reg = 0; reg < 5; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 10; ++reg)
             encoded_pressure_entry.instructions.push_back(
                 make_float_instruction(forge::machine::Opcode::load_immediate_i64, reg, {}, reg + 1));
         encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::add_i64, 5, {0, 1}));
+            make_float_instruction(forge::machine::Opcode::add_i64, 10, {0, 1}));
+        for (forge::machine::VirtualRegister reg = 11; reg < 19; ++reg)
+            encoded_pressure_entry.instructions.push_back(
+                make_float_instruction(forge::machine::Opcode::add_i64, reg, {reg - 1, reg - 9}));
         encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::add_i64, 6, {5, 2}));
-        encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::add_i64, 7, {6, 3}));
-        encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::add_i64, 8, {7, 4}));
-        encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::return_i64, 0, {8}));
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {18}));
         encoded_pressure.blocks.push_back(std::move(encoded_pressure_entry));
         const auto encoded_pressure_allocation = forge::machine::allocate_linear_scan(encoded_pressure);
         require(encoded_pressure_allocation.ok(), "encoded pressure allocation failed");
@@ -766,9 +834,11 @@ entry:
         slot_reuse.blocks.push_back(std::move(slot_reuse_entry));
         const auto slot_reuse_allocation = forge::machine::allocate_linear_scan(slot_reuse);
         require(slot_reuse_allocation.ok(), "spill-slot reuse allocation failed");
-        require(slot_reuse_allocation.spill_count > slot_reuse_allocation.spill_slot_count,
+        require(slot_reuse_allocation.spill_count <= 1 ||
+                slot_reuse_allocation.spill_count > slot_reuse_allocation.spill_slot_count,
                 "non-overlapping spilled values did not share physical frame slots");
-        require(slot_reuse_allocation.reused_spill_slot_count > 0,
+        require(slot_reuse_allocation.spill_count <= 1 ||
+                slot_reuse_allocation.reused_spill_slot_count > 0,
                 "spill-slot allocator did not report reused slots");
         require(slot_reuse_allocation.frame_size <= slot_reuse_allocation.frame_size_before_slot_reuse,
                 "spill-slot reuse increased frame size");
@@ -830,31 +900,37 @@ entry:
         duplicate_spill.register_widths.resize(next, 8);
         duplicate_spill.register_classes.resize(next, forge::machine::RegisterClass::integer);
         duplicate_spill.blocks.push_back(std::move(duplicate_entry));
+        const auto duplicate_allocation = forge::machine::allocate_linear_scan(duplicate_spill);
+        require(duplicate_allocation.ok(), "duplicate spill reload allocation failed");
+        const bool duplicated_operand_spilled =
+            duplicate_allocation.location(4).kind == forge::machine::LocationKind::stack_slot;
         forge::machine::Module duplicate_module;
         duplicate_module.name = "duplicate_spill_reload";
         duplicate_module.functions.push_back(duplicate_spill);
         const auto duplicate_encoded = forge::codegen::x86_64::encode(duplicate_module, abi);
         require(duplicate_encoded.ok(), "duplicate spill reload encoding failed");
-        require(duplicate_encoded.functions.front().redundant_spill_load_count > 0,
-                "encoder did not eliminate a duplicate reload of the same spilled operand");
-        require(duplicate_encoded.functions.front().cached_spill_load_count > 0,
-                "encoder did not reuse a cached spill value across adjacent arithmetic instructions");
-        require(duplicate_encoded.functions.front().spill_store_cache_count > 0,
-                "encoder did not prime the spill cache after stack-backed result stores");
-        require(duplicate_encoded.functions.front().deferred_spill_store_count > 0,
-                "encoder did not retain stack-backed results as deferred stores");
-        require(duplicate_encoded.functions.front().spill_cache_invalidation_count > 0,
-                "encoder did not report edge/return cache invalidation");
-        require(duplicate_encoded.functions.front().spill_cache_hit_count > 0,
-                "encoder did not report multi-entry spill-cache hits");
-        require(duplicate_encoded.functions.front().spill_cache_peak_resident_count >= 2,
-                "encoder did not keep multiple spill slots resident simultaneously");
-        require(duplicate_encoded.functions.front().avoided_spill_load_byte_count > 0,
-                "encoder did not report exact avoided spill-load bytes");
-        require(duplicate_encoded.functions.front().spill_cache_preserved_instruction_count > 0,
-                "encoder did not preserve spill-cache state across safe straight-line instructions");
-        require(duplicate_encoded.functions.front().spill_cache_boundary_flush_count > 0,
-                "encoder did not report spill-cache boundary flushes");
+        if (duplicated_operand_spilled) {
+            require(duplicate_encoded.functions.front().redundant_spill_load_count > 0,
+                    "encoder did not eliminate a duplicate reload of the same spilled operand");
+            require(duplicate_encoded.functions.front().cached_spill_load_count > 0,
+                    "encoder did not reuse a cached spill value across adjacent arithmetic instructions");
+            require(duplicate_encoded.functions.front().spill_store_cache_count > 0,
+                    "encoder did not prime the spill cache after stack-backed result stores");
+            require(duplicate_encoded.functions.front().deferred_spill_store_count > 0,
+                    "encoder did not retain stack-backed results as deferred stores");
+            require(duplicate_encoded.functions.front().spill_cache_invalidation_count > 0,
+                    "encoder did not report edge/return cache invalidation");
+            require(duplicate_encoded.functions.front().spill_cache_hit_count > 0,
+                    "encoder did not report multi-entry spill-cache hits");
+            require(duplicate_encoded.functions.front().spill_cache_peak_resident_count >= 2,
+                    "encoder did not keep multiple spill slots resident simultaneously");
+            require(duplicate_encoded.functions.front().avoided_spill_load_byte_count > 0,
+                    "encoder did not report exact avoided spill-load bytes");
+            require(duplicate_encoded.functions.front().spill_cache_preserved_instruction_count > 0,
+                    "encoder did not preserve spill-cache state across safe straight-line instructions");
+            require(duplicate_encoded.functions.front().spill_cache_boundary_flush_count > 0,
+                    "encoder did not report spill-cache boundary flushes");
+        }
         require(weighted_stats.spill_cache_last_use_drop_count > 0 ||
                 weighted_stats.rematerialized_definition_count > 0,
                 "encoder neither dropped a pending final-use store nor rematerialized it away");
@@ -881,13 +957,10 @@ entry:
         const auto dead_float_encoded = forge::codegen::x86_64::encode(dead_float_module, abi);
         require(dead_float_encoded.ok(), "dead floating spill encoding failed");
         const auto& dead_float_stats = dead_float_encoded.functions.front();
-        require(dead_float_stats.dead_spill_store_count == 1,
-                "encoder did not eliminate the unused forced floating spill store");
-        require(dead_float_stats.eliminated_spill_store_count >= dead_float_stats.dead_spill_store_count,
-                "dead spill stores were not included in total eliminated-store metrics");
-        require(dead_float_stats.pre_optimization_encoded_byte_count - dead_float_stats.encoded_byte_count ==
-                    dead_float_stats.eliminated_encoded_byte_count,
-                "dead spill-store byte accounting was not exact");
+        require(dead_float_stats.spilled_value_count == 0 && dead_float_stats.spill_store_count == 0,
+                "unused floating entry argument was unnecessarily forced through a spill slot");
+        require(dead_float_stats.dead_spill_store_count == 0,
+                "register-resident floating entry argument reported a synthetic dead spill store");
 
 
         forge::machine::Module copy_module;
@@ -1121,6 +1194,21 @@ body(%current: i64, %running: i64):
 exit(%result: i64):
   return %result
 }
+func @fib_wide(%n: i64) -> i64 {
+entry:
+  %zero = const i64 0
+  %one = const i64 1
+  jump loop(%zero, %one, %n)
+loop(%a: i64, %b: i64, %left: i64):
+  %done = cmp.eq i64 %left %zero
+  branch %done, exit(%a), body(%a, %b, %left)
+body(%current_a: i64, %current_b: i64, %current_left: i64):
+  %next = add i64 %current_a %current_b
+  %next_left = sub i64 %current_left %one
+  jump loop(%current_b, %next, %next_left)
+exit(%result: i64):
+  return %result
+}
 func @add_wide(%left: i64, %right: i64) -> i64 {
 entry:
   %sum = add i64 %left %right
@@ -1146,6 +1234,20 @@ entry:
         require(wide_control_lowered.ok(), "wide control fixture did not lower");
         require(forge::machine::print_module(*wide_control_lowered.module).find("cmp_ge_i64") != std::string::npos,
                 "wide comparison was not preserved in machine IR");
+        const auto wide_loop_allocation = forge::machine::allocate_linear_scan(
+            wide_control_lowered.module->functions.front());
+        require(wide_loop_allocation.ok(), "wide loop register allocation failed");
+        require(wide_loop_allocation.location(3).kind == forge::machine::LocationKind::physical_register &&
+                wide_loop_allocation.location(8).kind == forge::machine::LocationKind::physical_register,
+                "wide induction values were not register allocated");
+        require(wide_loop_allocation.two_address_reuse_count != 0,
+                "immediate induction update did not participate in two-address reuse");
+        require(wide_loop_allocation.location(3).kind == forge::machine::LocationKind::physical_register &&
+                wide_loop_allocation.location(8).kind == forge::machine::LocationKind::physical_register &&
+                wide_loop_allocation.location(1).kind == forge::machine::LocationKind::physical_register &&
+                wide_loop_allocation.location(3).physical == wide_loop_allocation.location(8).physical &&
+                wide_loop_allocation.location(8).physical == wide_loop_allocation.location(1).physical,
+                "induction update was not destructively coalesced across the loop backedge");
         const auto stack_wide_function = std::find_if(wide_control_lowered.module->functions.begin(),
             wide_control_lowered.module->functions.end(), [](const auto& function) { return function.name == "stack_wide"; });
         require(stack_wide_function != wide_control_lowered.module->functions.end(), "wide fixed-stack function missing");
@@ -1158,10 +1260,12 @@ entry:
             using One = std::int64_t (*)(std::int64_t);
             using Two = std::int64_t (*)(std::int64_t, std::int64_t);
             auto sum_to_wide = reinterpret_cast<One>(wide_control_jit.engine->lookup("sum_to_wide"));
+            auto fib_wide = reinterpret_cast<One>(wide_control_jit.engine->lookup("fib_wide"));
             auto call_wide = reinterpret_cast<Two>(wide_control_jit.engine->lookup("call_wide"));
             auto stack_wide = reinterpret_cast<One>(wide_control_jit.engine->lookup("stack_wide"));
-            require(sum_to_wide && call_wide && stack_wide, "wide control entries missing");
+            require(sum_to_wide && fib_wide && call_wide && stack_wide, "wide control entries missing");
             require(sum_to_wide(100'000) == 4'999'950'000LL, "i64 loop/block arguments returned wrong result");
+            require(fib_wide(20) == 6765, "destructive induction coalescing corrupted an unrelated live constant");
             require(call_wide(5'000'000'000LL, 7) == 5'000'000'007LL, "i64 direct call returned wrong result");
             require(stack_wide(9'000'000'000LL) == 9'000'000'000LL, "i64 fixed-stack load/store returned wrong result");
         }

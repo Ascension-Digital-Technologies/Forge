@@ -196,9 +196,9 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
  add_test(NAME forge-code-quality-baseline COMMAND ${CMAKE_COMMAND}
   -DFORGE_CODEGEN=$<TARGET_FILE:forge-codegen>
   -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/optimization.fir
-  -DMAX_ENCODED_BYTES=199
+  -DMAX_ENCODED_BYTES=125
   -DMIN_DEFERRED_STORES=0
-  -DMIN_REMATERIALIZED_VALUES=1
+  -DMIN_REMATERIALIZED_VALUES=0
   -DMIN_PRESERVED_INSTRUCTIONS=1
   -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen/check_quality.cmake)
  add_test(NAME forge-machine-cleanup-baseline COMMAND ${CMAKE_COMMAND}

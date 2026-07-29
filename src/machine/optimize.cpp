@@ -315,6 +315,59 @@ OptimizationStats optimize_function(Function& function) {
         }
     }
 
+    // Rotate simple two-block loops into entry, body, header, exit order.  The
+    // loop body then falls through to the header, while the header emits the
+    // sole conditional backedge to the body.  This removes the unconditional
+    // jump from the hot path without duplicating blocks or changing CFG edges.
+    // Restrict the transform to a single-predecessor body so placing it before
+    // the header cannot create an accidental fallthrough from another block.
+    if (function.blocks.size() > 2U) {
+        std::unordered_map<std::string, std::size_t> indices;
+        std::unordered_map<std::string, std::uint32_t> predecessors;
+        for (std::size_t index = 0; index < function.blocks.size(); ++index)
+            indices.emplace(function.blocks[index].name, index);
+        for (const auto& block : function.blocks)
+            for (const auto& instruction : block.instructions)
+                for (const auto& successor : instruction.successors)
+                    ++predecessors[successor.block];
+
+        bool rotated = true;
+        while (rotated) {
+            rotated = false;
+            indices.clear();
+            for (std::size_t index = 0; index < function.blocks.size(); ++index)
+                indices.emplace(function.blocks[index].name, index);
+            for (std::size_t header_index = 1U; header_index < function.blocks.size(); ++header_index) {
+                const auto& header = function.blocks[header_index];
+                if (header.instructions.empty()) continue;
+                const auto& branch = header.instructions.back();
+                if (branch.opcode != Opcode::branch_i1 || branch.successors.size() != 2U) continue;
+                for (const auto& successor : branch.successors) {
+                    const auto body_found = indices.find(successor.block);
+                    if (body_found == indices.end() || body_found->second == 0U) continue;
+                    const auto body_index = body_found->second;
+                    const auto& body = function.blocks[body_index];
+                    if (body.instructions.empty() || predecessors[body.name] != 1U) continue;
+                    const auto& jump = body.instructions.back();
+                    if (jump.opcode != Opcode::jump || jump.successors.size() != 1U ||
+                        jump.successors.front().block != header.name) continue;
+                    if (body_index + 1U == header_index) continue;
+
+                    auto moved = std::move(function.blocks[body_index]);
+                    function.blocks.erase(function.blocks.begin() + static_cast<std::ptrdiff_t>(body_index));
+                    auto adjusted_header = header_index;
+                    if (body_index < header_index) --adjusted_header;
+                    function.blocks.insert(function.blocks.begin() + static_cast<std::ptrdiff_t>(adjusted_header),
+                                           std::move(moved));
+                    stats.blocks_reordered = 1U;
+                    rotated = true;
+                    break;
+                }
+                if (rotated) break;
+            }
+        }
+    }
+
     std::vector<VirtualRegister> aliases(function.register_count);
     std::iota(aliases.begin(), aliases.end(), VirtualRegister{0});
     std::vector<bool> folded_address(function.register_count, false);
@@ -340,6 +393,71 @@ OptimizationStats optimize_function(Function& function) {
         for (auto& instruction : block.instructions)
             if (has_result(instruction.opcode) && instruction.result < definitions.size()) definitions[instruction.result] = &instruction;
     std::vector<bool> eliminated_constant(function.register_count, false);
+    std::vector<std::uint32_t> folded_constant_uses(function.register_count, 0U);
+    std::vector<std::uint32_t> immediate_capable_uses(function.register_count, 0U);
+
+    // Strength-reduce unsigned division and remainder by a power-of-two constant.
+    // This is valid for every unsigned input and replaces the expensive DIV
+    // instruction with a shift or mask. Keep the constant definition until all
+    // of its uses have been folded so mixed-use constants remain correct.
+    for (auto& block : function.blocks) {
+        for (auto& instruction : block.instructions) {
+            const bool unsigned_division = instruction.opcode == Opcode::div_u_i32 ||
+                                           instruction.opcode == Opcode::div_u_i64;
+            const bool unsigned_remainder = instruction.opcode == Opcode::rem_u_i32 ||
+                                            instruction.opcode == Opcode::rem_u_i64;
+            if ((!unsigned_division && !unsigned_remainder) || instruction.inputs.size() != 2U) continue;
+            const auto divisor_register = instruction.inputs[1];
+            const auto* divisor_definition = divisor_register < definitions.size()
+                ? definitions[divisor_register] : nullptr;
+            if (divisor_definition == nullptr ||
+                (divisor_definition->opcode != Opcode::load_immediate &&
+                 divisor_definition->opcode != Opcode::load_immediate_i64)) continue;
+            const auto divisor = static_cast<std::uint64_t>(divisor_definition->immediate);
+            if (divisor == 0U || (divisor & (divisor - 1U)) != 0U) continue;
+
+            const bool wide = instruction.opcode == Opcode::div_u_i64 ||
+                              instruction.opcode == Opcode::rem_u_i64;
+            instruction.inputs.resize(1U);
+            instruction.symbol = "$imm";
+            if (unsigned_division) {
+                std::uint32_t shift = 0U;
+                auto value = divisor;
+                while (value > 1U) { value >>= 1U; ++shift; }
+                instruction.opcode = wide ? Opcode::shr_u_i64 : Opcode::shr_u_i32;
+                instruction.immediate = static_cast<std::int64_t>(shift);
+            } else {
+                instruction.opcode = wide ? Opcode::and_i64 : Opcode::and_i32;
+                instruction.immediate = static_cast<std::int64_t>(divisor - 1U);
+            }
+            ++folded_constant_uses[divisor_register];
+            ++stats.immediate_forms_selected;
+        }
+    }
+    for (const auto& block : function.blocks) {
+        for (const auto& instruction : block.instructions) {
+            if (supports_integer_immediate(instruction.opcode) && instruction.inputs.size() == 2U) {
+                const auto right = instruction.inputs[1];
+                if (right < definitions.size() && definitions[right] != nullptr &&
+                    (definitions[right]->opcode == Opcode::load_immediate ||
+                     definitions[right]->opcode == Opcode::load_immediate_i64))
+                    ++immediate_capable_uses[right];
+                if (is_commutative_integer(instruction.opcode)) {
+                    const auto left = instruction.inputs[0];
+                    if (left < definitions.size() && definitions[left] != nullptr &&
+                        (definitions[left]->opcode == Opcode::load_immediate ||
+                         definitions[left]->opcode == Opcode::load_immediate_i64))
+                        ++immediate_capable_uses[left];
+                }
+            } else if (is_integer_comparison(instruction.opcode) && instruction.inputs.size() == 2U) {
+                const auto right = instruction.inputs[1];
+                if (right < definitions.size() && definitions[right] != nullptr &&
+                    (definitions[right]->opcode == Opcode::load_immediate ||
+                     definitions[right]->opcode == Opcode::load_immediate_i64))
+                    ++immediate_capable_uses[right];
+            }
+        }
+    }
     std::vector<bool> eliminated_load(function.register_count, false);
     for (auto& block : function.blocks) {
         for (auto& instruction : block.instructions) {
@@ -354,7 +472,7 @@ OptimizationStats optimize_function(Function& function) {
                 reg = instruction.inputs[constant_index];
                 definition = reg < definitions.size() ? definitions[reg] : nullptr;
             }
-            if (definition == nullptr || use_counts[reg] != 1U ||
+            if (definition == nullptr ||
                 (definition->opcode != Opcode::load_immediate && definition->opcode != Opcode::load_immediate_i64)) continue;
             const auto value = definition->immediate;
             const bool wide = instruction.opcode == Opcode::add_i64 || instruction.opcode == Opcode::sub_i64 ||
@@ -372,9 +490,8 @@ OptimizationStats optimize_function(Function& function) {
             instruction.inputs.resize(1U);
             instruction.immediate = value;
             instruction.symbol = "$imm";
-            eliminated_constant[reg] = true;
+            ++folded_constant_uses[reg];
             ++stats.immediate_forms_selected;
-            ++stats.constant_definitions_eliminated;
         }
     }
 
@@ -386,7 +503,7 @@ OptimizationStats optimize_function(Function& function) {
             if (!is_integer_comparison(instruction.opcode) || instruction.inputs.size() != 2U) continue;
             const auto constant = instruction.inputs[1];
             auto* definition = constant < definitions.size() ? definitions[constant] : nullptr;
-            if (definition == nullptr || use_counts[constant] != 1U ||
+            if (definition == nullptr ||
                 (definition->opcode != Opcode::load_immediate && definition->opcode != Opcode::load_immediate_i64)) continue;
             const auto value = definition->immediate;
             const bool wide = instruction.opcode >= Opcode::cmp_eq_i64;
@@ -395,8 +512,18 @@ OptimizationStats optimize_function(Function& function) {
             instruction.inputs.resize(1U);
             instruction.immediate = value;
             instruction.symbol = "$cmpimm";
-            eliminated_constant[constant] = true;
+            ++folded_constant_uses[constant];
             ++stats.immediate_comparisons_selected;
+        }
+    }
+
+    // A constant may be folded into only some of its uses. Keep its materialization
+    // for edge arguments, ABI uses, or unsupported operations, and remove it only
+    // when every original use has been rewritten. This shortens arithmetic live
+    // ranges without corrupting mixed-use constants such as loop initializers.
+    for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+        if (use_counts[reg] != 0U && folded_constant_uses[reg] == use_counts[reg]) {
+            eliminated_constant[reg] = true;
             ++stats.constant_definitions_eliminated;
         }
     }
@@ -516,6 +643,33 @@ OptimizationStats optimize_function(Function& function) {
     // the original comparison operands and condition in its immediate field,
     // allowing the encoder to emit cmp+jcc directly without materializing i1.
     std::vector<bool> fused_compare(function.register_count, false);
+    std::vector<bool> eliminated_test_mask(function.register_count, false);
+    for (auto& block : function.blocks) {
+        for (auto& select : block.instructions) {
+            if ((select.opcode != Opcode::select_i32 && select.opcode != Opcode::select_i64) ||
+                select.inputs.size() != 3U) continue;
+            const auto condition = select.inputs[0];
+            if (condition >= function.register_count || use_counts[condition] != 1U) continue;
+            auto* comparison = condition < definitions.size() ? definitions[condition] : nullptr;
+            if (comparison == nullptr || comparison->symbol != "$cmpimm" || comparison->immediate != 0 ||
+                (comparison->opcode != Opcode::cmp_eq_i32 && comparison->opcode != Opcode::cmp_ne_i32 &&
+                 comparison->opcode != Opcode::cmp_eq_i64 && comparison->opcode != Opcode::cmp_ne_i64) ||
+                comparison->inputs.size() != 1U) continue;
+            const auto masked = comparison->inputs[0];
+            auto* producer = masked < definitions.size() ? definitions[masked] : nullptr;
+            if (producer == nullptr || (producer->opcode != Opcode::and_i32 && producer->opcode != Opcode::and_i64) ||
+                producer->symbol != "$imm" || producer->inputs.size() != 1U || use_counts[masked] != 1U ||
+                producer->immediate < std::numeric_limits<std::int32_t>::min() ||
+                producer->immediate > std::numeric_limits<std::int32_t>::max()) continue;
+            select.inputs[0] = producer->inputs[0];
+            select.symbol = "$testimm";
+            select.argument_index = static_cast<std::uint32_t>(comparison->opcode) + 1U;
+            select.immediate = producer->immediate;
+            fused_compare[condition] = true;
+            eliminated_test_mask[masked] = true;
+        }
+    }
+
     for (auto& block : function.blocks) {
         for (auto& branch : block.instructions) {
             if (branch.opcode != Opcode::branch_i1 || branch.inputs.size() != 1U) continue;
@@ -535,7 +689,50 @@ OptimizationStats optimize_function(Function& function) {
             }
             if (comparison == nullptr) continue;
             branch.inputs = comparison->inputs;
-            if (comparison->symbol == "$cmpimm") {
+            bool reuse_arithmetic_flags = false;
+            bool use_test_immediate = false;
+            if (comparison->symbol == "$cmpimm" && comparison->immediate == 0 &&
+                (comparison->opcode == Opcode::cmp_eq_i32 || comparison->opcode == Opcode::cmp_ne_i32 ||
+                 comparison->opcode == Opcode::cmp_eq_i64 || comparison->opcode == Opcode::cmp_ne_i64) &&
+                !comparison->inputs.empty()) {
+                const auto masked = comparison->inputs.front();
+                auto* producer = masked < definitions.size() ? definitions[masked] : nullptr;
+                if (producer != nullptr &&
+                    (producer->opcode == Opcode::and_i32 || producer->opcode == Opcode::and_i64) &&
+                    producer->symbol == "$imm" && producer->inputs.size() == 1U &&
+                    masked < use_counts.size() && use_counts[masked] == 1U &&
+                    producer->immediate >= std::numeric_limits<std::int32_t>::min() &&
+                    producer->immediate <= std::numeric_limits<std::int32_t>::max()) {
+                    branch.inputs = producer->inputs;
+                    branch.symbol = "$testimm";
+                    branch.argument_index = static_cast<std::uint32_t>(comparison->opcode) + 1U;
+                    branch.immediate = producer->immediate;
+                    eliminated_test_mask[masked] = true;
+                    use_test_immediate = true;
+                }
+            }
+            if (comparison->symbol == "$cmpimm" && comparison->immediate == 0 &&
+                (comparison->opcode == Opcode::cmp_eq_i32 || comparison->opcode == Opcode::cmp_ne_i32 ||
+                 comparison->opcode == Opcode::cmp_eq_i64 || comparison->opcode == Opcode::cmp_ne_i64)) {
+                const auto comparison_index = static_cast<std::size_t>(comparison - block.instructions.data());
+                if (comparison_index > 0U && &block.instructions[comparison_index + 1U] == &branch) {
+                    const auto& producer = block.instructions[comparison_index - 1U];
+                    const bool flag_setting_integer = producer.opcode == Opcode::add_i32 || producer.opcode == Opcode::add_i64 ||
+                        producer.opcode == Opcode::sub_i32 || producer.opcode == Opcode::sub_i64 ||
+                        producer.opcode == Opcode::and_i32 || producer.opcode == Opcode::and_i64 ||
+                        producer.opcode == Opcode::or_i32 || producer.opcode == Opcode::or_i64 ||
+                        producer.opcode == Opcode::xor_i32 || producer.opcode == Opcode::xor_i64;
+                    reuse_arithmetic_flags = flag_setting_integer && !comparison->inputs.empty() &&
+                        producer.result == comparison->inputs.front();
+                }
+            }
+            if (use_test_immediate) {
+                // Already encoded above as a direct TEST of the original value.
+            } else if (reuse_arithmetic_flags) {
+                branch.symbol = "$flags";
+                branch.argument_index = static_cast<std::uint32_t>(comparison->opcode) + 1U;
+                branch.immediate = 0;
+            } else if (comparison->symbol == "$cmpimm") {
                 branch.symbol = "$cmpimm";
                 branch.argument_index = static_cast<std::uint32_t>(comparison->opcode) + 1U;
                 branch.immediate = comparison->immediate;
@@ -658,6 +855,10 @@ OptimizationStats optimize_function(Function& function) {
 
             if (instruction.result < fused_compare.size() && fused_compare[instruction.result] &&
                 is_integer_comparison(instruction.opcode)) {
+                continue;
+            }
+            if (instruction.result < eliminated_test_mask.size() && eliminated_test_mask[instruction.result] &&
+                (instruction.opcode == Opcode::and_i32 || instruction.opcode == Opcode::and_i64)) {
                 continue;
             }
             if (instruction.result < eliminated_constant.size() && eliminated_constant[instruction.result] &&

@@ -1210,6 +1210,27 @@ entry:
         dynamic_callback_table_fixture.compare_i64_2("dispatch", value, 1);
     }
 
+    constexpr auto multi_recurrence_module = R"(module @multi_recurrence_runtime {
+func @fib(%n: i64) -> i64 {
+entry:
+  %zero = const i64 0
+  %one = const i64 1
+  jump loop(%zero, %zero, %one)
+loop(%i: i64, %a: i64, %b: i64):
+  %done = cmp.ge i64 %i %n
+  branch %done, exit(%a), body(%i, %a, %b)
+body(%j: i64, %x: i64, %y: i64):
+  %sum = add i64 %x %y
+  %next = add i64 %j %one
+  jump loop(%next, %y, %sum)
+exit(%result: i64):
+  return %result
+}
+})";
+    DifferentialModule multi_recurrence_fixture(multi_recurrence_module);
+    for (const auto value : std::array<std::int64_t, 7>{0, 1, 2, 10, 20, 50, 90})
+        multi_recurrence_fixture.compare_i64_1("fib", value);
+
     std::cout << "interpreter/JIT differential tests passed\n";
     return 0;
 #endif

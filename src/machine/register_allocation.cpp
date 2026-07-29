@@ -182,18 +182,35 @@ LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
                     const auto width = reg < function.register_widths.size() ? function.register_widths[reg] : 64U;
                     const auto register_class = reg < function.register_classes.size()
                         ? function.register_classes[reg] : RegisterClass::integer;
-                    function.local_stack_size += 8U;
-                    const auto offset = -static_cast<std::int64_t>(function.local_stack_size);
-                    stores.push_back({split_store_opcode(register_class, width), 0U, {reg}, offset, 0U, {}, {}});
+                    const Instruction* rematerializable = nullptr;
+                    for (std::size_t earlier = instruction_index; earlier-- > 0U;) {
+                        const auto& candidate = block.instructions[earlier];
+                        if (candidate.result != reg) continue;
+                        if (candidate.opcode == Opcode::load_immediate_f32 ||
+                            candidate.opcode == Opcode::load_immediate_f64)
+                            rematerializable = &candidate;
+                        break;
+                    }
                     const auto replacement = function.register_count++;
                     function.register_widths.push_back(width);
                     function.register_classes.push_back(register_class);
-                    loads.push_back({split_load_opcode(register_class, width), replacement, {}, offset, 0U, {}, {}});
+                    if (rematerializable != nullptr) {
+                        auto reload = *rematerializable;
+                        reload.result = replacement;
+                        loads.push_back(std::move(reload));
+                        ++stats.transition_loads;
+                        stats.transition_bytes += 8U;
+                    } else {
+                        function.local_stack_size += 8U;
+                        const auto offset = -static_cast<std::int64_t>(function.local_stack_size);
+                        stores.push_back({split_store_opcode(register_class, width), 0U, {reg}, offset, 0U, {}, {}});
+                        loads.push_back({split_load_opcode(register_class, width), replacement, {}, offset, 0U, {}, {}});
+                        ++stats.transition_stores;
+                        ++stats.transition_loads;
+                        stats.transition_bytes += 16U;
+                    }
                     replacements.emplace_back(reg, replacement);
                     ++stats.split_values;
-                    ++stats.transition_stores;
-                    ++stats.transition_loads;
-                    stats.transition_bytes += 16U;
                 }
 
                 block.instructions.insert(block.instructions.begin() + static_cast<std::ptrdiff_t>(instruction_index),
@@ -662,6 +679,38 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     std::vector<std::uint32_t> call_positions;
     std::vector<bool> forced_floating_spill(function.register_count, false);
     std::vector<VirtualRegister> copy_sources(function.register_count, function.register_count);
+    // Treat loop-backedge block arguments as copy affinities. A loop-carried
+    // value and the corresponding header parameter are not simultaneously live
+    // across the edge, so assigning them the same physical register removes the
+    // edge parallel copy entirely. Prefer backward edges because entry edges
+    // often carry constants while the backedge represents the steady-state hot
+    // path.
+    std::unordered_map<std::string, std::size_t> allocation_block_indices;
+    for (std::size_t block_index = 0; block_index < function.blocks.size(); ++block_index)
+        allocation_block_indices.emplace(function.blocks[block_index].name, block_index);
+    for (std::size_t source_index = 0; source_index < function.blocks.size(); ++source_index) {
+        const auto& source_block = function.blocks[source_index];
+        if (source_block.instructions.empty()) continue;
+        for (const auto& successor : source_block.instructions.back().successors) {
+            const auto target = allocation_block_indices.find(successor.block);
+            if (target == allocation_block_indices.end() || target->second > source_index) continue;
+            const auto& parameters = function.blocks[target->second].parameters;
+            const auto count = std::min(parameters.size(), successor.arguments.size());
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto parameter = parameters[index];
+                const auto argument = successor.arguments[index];
+                if (parameter >= function.register_count || argument >= function.register_count || parameter == argument)
+                    continue;
+                const bool parameter_floating = parameter < function.register_classes.size() &&
+                                                function.register_classes[parameter] == RegisterClass::floating;
+                const bool argument_floating = argument < function.register_classes.size() &&
+                                               function.register_classes[argument] == RegisterClass::floating;
+                if (parameter_floating != argument_floating) continue;
+                copy_sources[parameter] = argument;
+                ++allocation.copy_hint_count;
+            }
+        }
+    }
     std::vector<VirtualRegister> two_address_sources(function.register_count, function.register_count);
     std::vector<VirtualRegister> unary_sources(function.register_count, function.register_count);
     std::uint32_t position = 0;
@@ -672,10 +721,16 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
                  instruction.opcode == Opcode::copy_f64) && instruction.inputs.size() == 1 &&
                 instruction.result < function.register_count)
                 copy_sources[instruction.result] = instruction.inputs.front(), ++allocation.copy_hint_count;
-            if (supports_two_address_reuse(instruction.opcode) && instruction.inputs.size() == 2 &&
+            if (supports_two_address_reuse(instruction.opcode) && !instruction.inputs.empty() &&
                 instruction.result < function.register_count) {
+                // Immediate arithmetic carries only its register operand in
+                // inputs.  It is still a two-address x86 operation and should
+                // inherit that dying operand's location just like reg-reg
+                // arithmetic.  Missing this case forced add-immediate loop
+                // updates through a temporary register followed by an edge
+                // copy back into the header parameter.
                 auto source = instruction.inputs.front();
-                if (is_commutative_two_address(instruction.opcode)) {
+                if (instruction.inputs.size() == 2 && is_commutative_two_address(instruction.opcode)) {
                     const auto right = instruction.inputs[1];
                     const auto left_dies = source < allocation.intervals.size() &&
                                            allocation.intervals[source].end == position;
@@ -693,16 +748,16 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             case Opcode::call_indirect_i32: case Opcode::call_indirect_i64: case Opcode::call_indirect_f32:
             case Opcode::call_indirect_f64: case Opcode::call_indirect_void:
                 call_positions.push_back(position);
-                for (const auto reg : instruction.inputs)
-                    if (reg < function.register_count && reg < function.register_classes.size() &&
-                        function.register_classes[reg] == RegisterClass::floating)
-                        forced_floating_spill[reg] = true;
+                // Outgoing XMM arguments are placed by the cycle-safe parallel-copy
+                // planner.  A floating value consumed by this call does not need a
+                // stack home merely because it is an argument; only values whose
+                // live interval genuinely crosses the call are required to spill.
                 break;
             default: break;
             }
-            if ((instruction.opcode == Opcode::load_argument_f32 || instruction.opcode == Opcode::load_argument_f64) &&
-                instruction.result < function.register_count)
-                forced_floating_spill[instruction.result] = true;
+            // Floating entry arguments are resolved as a parallel copy by the
+            // x86-64 encoder.  They no longer need to be forced to stack solely
+            // to protect incoming XMM registers from sequential load ordering.
             ++position;
         }
     }
@@ -766,7 +821,16 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     struct FloatingActive { LiveInterval interval; FloatingPhysicalRegister physical; };
     std::vector<IntegerActive> integer_active;
     std::vector<FloatingActive> floating_active;
-    constexpr std::array integer_physicals{PhysicalRegister::r10d, PhysicalRegister::r11d, PhysicalRegister::r12d, PhysicalRegister::r13d};
+    constexpr std::array base_integer_physicals{PhysicalRegister::r10d, PhysicalRegister::r11d,
+                                                    PhysicalRegister::r12d, PhysicalRegister::r13d,
+                                                    PhysicalRegister::r14d, PhysicalRegister::r15d,
+                                                    PhysicalRegister::ebx};
+    std::vector<PhysicalRegister> integer_physicals(base_integer_physicals.begin(), base_integer_physicals.end());
+    // The encoder captures incoming r8/r9 arguments before any allocated value can
+    // overwrite them, so both caller-saved registers are available for every
+    // signature rather than only zero-, one-, and two-argument functions.
+    integer_physicals.insert(integer_physicals.begin() + 2, PhysicalRegister::r8d);
+    integer_physicals.insert(integer_physicals.begin() + 3, PhysicalRegister::r9d);
     constexpr std::array floating_physicals{FloatingPhysicalRegister::xmm2, FloatingPhysicalRegister::xmm3, FloatingPhysicalRegister::xmm4, FloatingPhysicalRegister::xmm5};
     std::vector<PhysicalRegister> free_integer(integer_physicals.begin(), integer_physicals.end());
     std::vector<FloatingPhysicalRegister> free_floating(floating_physicals.begin(), floating_physicals.end());
@@ -781,8 +845,8 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         }
         if (across_call) return std::nullopt;
         if (free_integer.empty()) return std::nullopt;
-        const auto physical = free_integer.back();
-        free_integer.pop_back();
+        const auto physical = free_integer.front();
+        free_integer.erase(free_integer.begin());
         return physical;
     };
     const auto record_integer_allocation = [&](PhysicalRegister physical) {
@@ -944,23 +1008,33 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     // physical register can be shared when no already allocated value of the
     // same class interferes in any real liveness segment. This is the first
     // segmented-allocation stage and requires no mid-interval location change.
-    const auto integer_available = [&](VirtualRegister reg, PhysicalRegister physical) {
+    const auto integer_available_except_two = [&](VirtualRegister reg, PhysicalRegister physical,
+                                                  VirtualRegister ignored, VirtualRegister also_ignored) {
         for (VirtualRegister other = 0; other < function.register_count; ++other) {
-            if (other == reg) continue;
+            if (other == reg || other == ignored || other == also_ignored) continue;
             const auto& location = allocation.locations[other];
             if (location.kind != LocationKind::physical_register || location.physical != physical) continue;
             if (segments_overlap(allocation.intervals[reg], allocation.intervals[other])) return false;
         }
         return true;
     };
-    const auto floating_available = [&](VirtualRegister reg, FloatingPhysicalRegister physical) {
+    const auto integer_available_except = [&](VirtualRegister reg, PhysicalRegister physical, VirtualRegister ignored) {
+        return integer_available_except_two(reg, physical, ignored, function.register_count);
+    };
+    const auto integer_available = [&](VirtualRegister reg, PhysicalRegister physical) {
+        return integer_available_except(reg, physical, function.register_count);
+    };
+    const auto floating_available_except = [&](VirtualRegister reg, FloatingPhysicalRegister physical, VirtualRegister ignored) {
         for (VirtualRegister other = 0; other < function.register_count; ++other) {
-            if (other == reg) continue;
+            if (other == reg || other == ignored) continue;
             const auto& location = allocation.locations[other];
             if (location.kind != LocationKind::floating_register || location.floating != physical) continue;
             if (segments_overlap(allocation.intervals[reg], allocation.intervals[other])) return false;
         }
         return true;
+    };
+    const auto floating_available = [&](VirtualRegister reg, FloatingPhysicalRegister physical) {
+        return floating_available_except(reg, physical, function.register_count);
     };
     for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
         if (allocation.locations[reg].kind != LocationKind::stack_slot || allocation.intervals[reg].use_count == 0U)
@@ -995,6 +1069,197 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     }
 
 
+    // Revisit two-address and unary reuse after the initial scan.  Block
+    // layout and segmented liveness can make a dying source unavailable to
+    // the local scan even though the final allocation has no real conflict.
+    // Relocating the short-lived result into the source register is especially
+    // important for loop induction updates: it lets an add-immediate update
+    // the loop-carried register directly and removes the backedge copy.
+    for (VirtualRegister destination = 0; destination < function.register_count; ++destination) {
+        const auto arithmetic_source = two_address_sources[destination];
+        const auto unary_source = unary_sources[destination];
+        const auto source = arithmetic_source < function.register_count ? arithmetic_source : unary_source;
+        if (source >= function.register_count || source == destination) continue;
+        if (allocation.intervals[destination].use_count == 0U || allocation.intervals[source].use_count == 0U)
+            continue;
+        if (allocation.intervals[source].end != allocation.intervals[destination].start &&
+            segments_overlap(allocation.intervals[source], allocation.intervals[destination]))
+            continue;
+        const bool floating = destination < function.register_classes.size() &&
+                              function.register_classes[destination] == RegisterClass::floating;
+        const bool source_floating = source < function.register_classes.size() &&
+                                     function.register_classes[source] == RegisterClass::floating;
+        if (floating != source_floating) continue;
+        auto& destination_location = allocation.locations[destination];
+        const auto& source_location = allocation.locations[source];
+        if (floating && source_location.kind == LocationKind::floating_register &&
+            !crosses_call(allocation.intervals[destination]) && !forced_floating_spill[destination] &&
+            floating_available_except(destination, source_location.floating, source)) {
+            if (destination_location.kind == LocationKind::floating_register &&
+                destination_location.floating == source_location.floating) continue;
+            destination_location = {LocationKind::floating_register, PhysicalRegister::r10d,
+                                    source_location.floating, 0};
+            if (arithmetic_source < function.register_count) ++allocation.two_address_reuse_count;
+            else ++allocation.unary_reuse_count;
+        } else if (!floating && source_location.kind == LocationKind::physical_register &&
+                   (!crosses_call(allocation.intervals[destination]) || is_callee_saved(source_location.physical))) {
+            // A loop induction update commonly has three consecutive virtual
+            // values that should occupy one physical register: the body
+            // parameter, the arithmetic result, and the successor header
+            // parameter.  The successor parameter can appear to interfere with
+            // the arithmetic result even though the edge copy defines it only
+            // after the result's final use. Ignore that single affinity consumer
+            // while relocating the short-lived result into the dying source.
+            VirtualRegister affinity_consumer = function.register_count;
+            for (const auto& predecessor : function.blocks) {
+                if (predecessor.instructions.empty()) continue;
+                for (const auto& edge : predecessor.instructions.back().successors) {
+                    const auto target = allocation_block_indices.find(edge.block);
+                    if (target == allocation_block_indices.end()) continue;
+                    const auto& parameters = function.blocks[target->second].parameters;
+                    const auto count = std::min(parameters.size(), edge.arguments.size());
+                    for (std::size_t index = 0; index < count; ++index) {
+                        if (edge.arguments[index] == destination) {
+                            affinity_consumer = parameters[index];
+                            break;
+                        }
+                    }
+                    if (affinity_consumer < function.register_count) break;
+                }
+                if (affinity_consumer < function.register_count) break;
+            }
+            const auto feeds_affinity_consumer = [&](VirtualRegister candidate) {
+                if (affinity_consumer >= function.register_count) return false;
+                for (const auto& predecessor : function.blocks) {
+                    if (predecessor.instructions.empty()) continue;
+                    for (const auto& edge : predecessor.instructions.back().successors) {
+                        const auto target = allocation_block_indices.find(edge.block);
+                        if (target == allocation_block_indices.end()) continue;
+                        const auto& parameters = function.blocks[target->second].parameters;
+                        const auto count = std::min(parameters.size(), edge.arguments.size());
+                        for (std::size_t index = 0; index < count; ++index)
+                            if (parameters[index] == affinity_consumer && edge.arguments[index] == candidate)
+                                return true;
+                    }
+                }
+                return false;
+            };
+            bool available = true;
+            for (VirtualRegister other = 0; other < function.register_count; ++other) {
+                if (other == destination || other == source || other == affinity_consumer ||
+                    feeds_affinity_consumer(other)) continue;
+                const auto& location = allocation.locations[other];
+                if (location.kind != LocationKind::physical_register ||
+                    location.physical != source_location.physical) continue;
+                if (segments_overlap(allocation.intervals[destination], allocation.intervals[other])) {
+                    available = false;
+                    break;
+                }
+            }
+            if (!available) continue;
+            if (destination_location.kind == LocationKind::physical_register &&
+                destination_location.physical == source_location.physical) continue;
+            destination_location = {LocationKind::physical_register, source_location.physical,
+                                    FloatingPhysicalRegister::xmm2, 0};
+            if (arithmetic_source < function.register_count) ++allocation.two_address_reuse_count;
+            else ++allocation.unary_reuse_count;
+        }
+    }
+
+    // Destructively coalesce simple induction-variable phi webs.  After hot-loop
+    // layout the physical backedge may be forward in block order, so the normal
+    // backward-edge affinity heuristic cannot see it.  When an arithmetic result
+    // is used solely as an edge argument, its source dies at the definition, and
+    // every feeder of the target parameter is mutually exclusive, the complete
+    // source/result/parameter web can safely share one physical register.
+    for (VirtualRegister result = 0; result < function.register_count; ++result) {
+        const auto source = two_address_sources[result];
+        if (source >= function.register_count || source == result ||
+            allocation.intervals[result].use_count != 1U ||
+            allocation.intervals[source].end != allocation.intervals[result].start)
+            continue;
+        const auto source_location = allocation.locations[source];
+        if (source_location.kind != LocationKind::physical_register) continue;
+
+        // The destructive source must itself be a loop-carried block parameter.
+        // A dying literal or temporary operand is not part of the induction phi
+        // web even when a two-address instruction could legally overwrite it.
+        // Coalescing such an operand into the destination parameter can corrupt
+        // another recurrence that still consumes the value (Fibonacci exposed
+        // this with the shared constant one).
+        std::optional<std::size_t> source_parameter_index;
+        const machine::Block* defining_block = nullptr;
+        for (const auto& candidate_block : function.blocks) {
+            if (std::any_of(candidate_block.instructions.begin(), candidate_block.instructions.end(),
+                            [&](const auto& instruction) { return instruction.result == result; })) {
+                defining_block = &candidate_block;
+                const auto source_it = std::find(candidate_block.parameters.begin(),
+                                                 candidate_block.parameters.end(), source);
+                if (source_it != candidate_block.parameters.end())
+                    source_parameter_index = static_cast<std::size_t>(
+                        std::distance(candidate_block.parameters.begin(), source_it));
+                break;
+            }
+        }
+        if (!defining_block || !source_parameter_index) continue;
+
+        VirtualRegister parameter = function.register_count;
+        std::optional<std::size_t> target_parameter_index;
+        std::vector<VirtualRegister> feeders;
+        for (const auto& predecessor : function.blocks) {
+            if (predecessor.instructions.empty()) continue;
+            for (const auto& edge : predecessor.instructions.back().successors) {
+                const auto target = allocation_block_indices.find(edge.block);
+                if (target == allocation_block_indices.end()) continue;
+                const auto& parameters = function.blocks[target->second].parameters;
+                const auto count = std::min(parameters.size(), edge.arguments.size());
+                for (std::size_t index = 0; index < count; ++index) {
+                    if (edge.arguments[index] == result) {
+                        parameter = parameters[index];
+                        target_parameter_index = index;
+                    }
+                }
+            }
+        }
+        if (parameter >= function.register_count || !target_parameter_index ||
+            *target_parameter_index != *source_parameter_index)
+            continue;
+        // Only the steady-state induction chain may be destructively
+        // coalesced. Other predecessor feeders (typically entry constants) can
+        // have unrelated uses elsewhere in the loop. Assigning those feeders
+        // to the induction register can silently overwrite a still-live value
+        // (for example Fibonacci's constant one, which also feeds the counter
+        // decrement). Entry edges can retain an ordinary parallel copy; the hot
+        // backedge is the part that must become copy-free.
+        feeders.push_back(source);
+        feeders.push_back(result);
+        feeders.push_back(parameter);
+        std::sort(feeders.begin(), feeders.end());
+        feeders.erase(std::unique(feeders.begin(), feeders.end()), feeders.end());
+
+        bool safe = true;
+        for (VirtualRegister other = 0; other < function.register_count && safe; ++other) {
+            if (std::binary_search(feeders.begin(), feeders.end(), other)) continue;
+            const auto& location = allocation.locations[other];
+            if (location.kind == LocationKind::physical_register &&
+                location.physical == source_location.physical &&
+                segments_overlap(allocation.intervals[result], allocation.intervals[other]))
+                safe = false;
+        }
+        if (!safe) continue;
+        for (const auto member : feeders) {
+            if (member >= function.register_count) continue;
+            const bool floating = member < function.register_classes.size() &&
+                                  function.register_classes[member] == RegisterClass::floating;
+            if (floating) { safe = false; break; }
+        }
+        if (!safe) continue;
+        for (const auto member : feeders)
+            allocation.locations[member] = {LocationKind::physical_register, source_location.physical,
+                                            FloatingPhysicalRegister::xmm2, 0};
+        ++allocation.two_address_reuse_count;
+    }
+
     // Honor copy affinities after the initial scan and hole-aware recovery.
     // Local coalescing above handles adjacent intervals. This global stage uses
     // segmented interference, so copies that cross block boundaries or
@@ -1024,22 +1289,46 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         if (floating != source_floating) continue;
 
         auto& destination_location = allocation.locations[destination];
-        const auto& source_location = allocation.locations[source];
+        auto& source_location = allocation.locations[source];
+        if ((floating && destination_location.kind == LocationKind::floating_register &&
+             source_location.kind == LocationKind::floating_register &&
+             destination_location.floating == source_location.floating) ||
+            (!floating && destination_location.kind == LocationKind::physical_register &&
+             source_location.kind == LocationKind::physical_register &&
+             destination_location.physical == source_location.physical))
+            continue;
         const bool destination_was_spilled = destination_location.kind == LocationKind::stack_slot;
         bool coalesced = false;
         if (floating && source_location.kind == LocationKind::floating_register &&
             !crosses_call(allocation.intervals[destination]) && !forced_floating_spill[destination] &&
-            floating_available(destination, source_location.floating)) {
+            floating_available_except(destination, source_location.floating, source)) {
             destination_location = {LocationKind::floating_register, PhysicalRegister::r10d,
                                     source_location.floating, 0};
             coalesced = true;
         } else if (!floating && source_location.kind == LocationKind::physical_register &&
                    (!crosses_call(allocation.intervals[destination]) ||
                     is_callee_saved(source_location.physical)) &&
-                   integer_available(destination, source_location.physical)) {
+                   integer_available_except(destination, source_location.physical, source)) {
             destination_location = {LocationKind::physical_register, source_location.physical,
                                     FloatingPhysicalRegister::xmm2, 0};
             if (destination_was_spilled) record_integer_allocation(source_location.physical);
+            coalesced = true;
+        } else if (floating && destination_location.kind == LocationKind::floating_register &&
+                   !crosses_call(allocation.intervals[source]) && !forced_floating_spill[source] &&
+                   floating_available_except(source, destination_location.floating, destination)) {
+            // Backedge values are commonly defined after their loop-header
+            // parameters have already received registers.  Relocate the
+            // short-lived producer into the parameter's register when moving
+            // the parameter to the producer is blocked by another interval.
+            source_location = {LocationKind::floating_register, PhysicalRegister::r10d,
+                               destination_location.floating, 0};
+            coalesced = true;
+        } else if (!floating && destination_location.kind == LocationKind::physical_register &&
+                   (!crosses_call(allocation.intervals[source]) ||
+                    is_callee_saved(destination_location.physical)) &&
+                   integer_available_except(source, destination_location.physical, destination)) {
+            source_location = {LocationKind::physical_register, destination_location.physical,
+                               FloatingPhysicalRegister::xmm2, 0};
             coalesced = true;
         }
         if (!coalesced) continue;

@@ -66,6 +66,8 @@ const char* opcode_name(Opcode opcode) noexcept {
     case Opcode::or_i64: return "or_i64";
     case Opcode::xor_i32: return "xor_i32";
     case Opcode::xor_i64: return "xor_i64";
+    case Opcode::select_i32: return "select_i32";
+    case Opcode::select_i64: return "select_i64";
     case Opcode::shl_i32: return "shl_i32";
     case Opcode::shl_i64: return "shl_i64";
     case Opcode::shr_s_i32: return "shr_s_i32";

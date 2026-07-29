@@ -37,9 +37,29 @@ public:
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
 };
 
+class ScalarStackPromotionPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "scalar-stack-promotion"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
 class MemoryForwardingPass final : public pass::FunctionPass {
 public:
     std::string name() const override { return "memory-forwarding"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class DeadStoreEliminationPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "dead-store-elimination"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class LoopReductionPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "loop-reduction"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class ConstantTripLoopUnrollPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "constant-trip-loop-unroll"; }
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
 };
 class LoopInvariantCodeMotionPass final : public pass::FunctionPass {
@@ -52,9 +72,28 @@ public:
     std::string name() const override { return "dce"; }
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
 };
+class IfConversionPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "if-conversion"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class MergeParameterSimplificationPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "merge-parameter-simplification"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
 class SimplifyCFGPass final : public pass::FunctionPass {
 public:
     std::string name() const override { return "simplify-cfg"; }
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
+class ScalarCleanupFixpointPass final : public pass::FunctionPass {
+public:
+    explicit ScalarCleanupFixpointPass(std::size_t max_iterations = 4)
+        : max_iterations_(max_iterations) {}
+    std::string name() const override { return "scalar-cleanup-fixpoint"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+private:
+    std::size_t max_iterations_{};
 };
 } // namespace forge::transforms

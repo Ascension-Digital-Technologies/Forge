@@ -1,48 +1,10 @@
-# CMake and build output
 /build/
-/cmake-build-*/
-/CMakeFiles/
-/CMakeCache.txt
-/cmake_install.cmake
-/CTestTestfile.cmake
-/Testing/
-/compile_commands.json
-/install_manifest.txt
-
-# Generated binaries and objects
-*.a
-*.lib
-*.so
-*.so.*
-*.dylib
-*.dll
-*.exe
+build/
 *.o
 *.obj
-*.pdb
-*.ilk
-
-# Generated Forge artifacts
-*.firb
-*.forge-cache
-
-# Coverage, profiling, and sanitizer output
-coverage/
-*.gcda
-*.gcno
-*.profraw
-*.profdata
-
-# Editors and operating systems
-.vscode/
-.idea/
-.vs/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# Packaging
-/_packages/
-*.tar.gz
-*.zip
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib

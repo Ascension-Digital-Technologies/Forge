@@ -12,18 +12,25 @@
 namespace forge::machine {
 
 enum class PhysicalRegister : std::uint8_t {
+    r8d,
+    r9d,
+    ebx,
     r10d,
     r11d,
     r12d,
     r13d,
+    r14d,
+    r15d,
 };
 
 [[nodiscard]] constexpr bool is_call_clobbered(PhysicalRegister reg) noexcept {
-    return reg == PhysicalRegister::r10d || reg == PhysicalRegister::r11d;
+    return reg == PhysicalRegister::r8d || reg == PhysicalRegister::r9d ||
+           reg == PhysicalRegister::r10d || reg == PhysicalRegister::r11d;
 }
 
 [[nodiscard]] constexpr bool is_callee_saved(PhysicalRegister reg) noexcept {
-    return reg == PhysicalRegister::r12d || reg == PhysicalRegister::r13d;
+    return reg == PhysicalRegister::ebx || reg == PhysicalRegister::r12d || reg == PhysicalRegister::r13d ||
+           reg == PhysicalRegister::r14d || reg == PhysicalRegister::r15d;
 }
 
 enum class FloatingPhysicalRegister : std::uint8_t {

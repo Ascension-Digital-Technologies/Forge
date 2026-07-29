@@ -125,6 +125,8 @@ std::size_t expected_inputs(Opcode opcode) {
     case Opcode::store_ptr_i64:
     case Opcode::store_ptr_f32:
     case Opcode::store_ptr_f64: return 2;
+    case Opcode::select_i32:
+    case Opcode::select_i64: return 3;
     case Opcode::return_void: return 0;
     case Opcode::return_aggregate: return 1;
     case Opcode::jump: return 0;
@@ -172,15 +174,21 @@ Diagnostics verify_module(const Module& module) {
                 const auto expected = (ins.symbol == "$imm" || ins.symbol == "$memstack") ? 1U :
                     (ins.symbol == "$fcmp" ? 2U :
                      (ins.symbol == "$cmpimm" ? 1U :
+                     (ins.symbol == "$testimm" ? ((ins.opcode == Opcode::select_i32 || ins.opcode == Opcode::select_i64) ? 3U : 1U) :
+                     (ins.symbol == "$flags" ? 1U :
                      (ins.symbol == "$retimm" || ins.symbol == "$retloadstack" ? 0U :
                       (ins.symbol == "$storeimm" ? immediate_store_inputs :
-                       (ins.opcode == Opcode::branch_i1 && ins.immediate != 0 ? 2U : expected_inputs(ins.opcode))))));
+                       (ins.opcode == Opcode::branch_i1 && ins.immediate != 0 ? 2U : expected_inputs(ins.opcode))))))));
                 if (ins.symbol == "$imm" && !supports_integer_immediate(ins.opcode))
                     error(diagnostics, "immediate operand on unsupported opcode in @" + function.name);
                 if (ins.symbol == "$memstack" && !supports_integer_immediate(ins.opcode))
                     error(diagnostics, "memory operand on unsupported opcode in @" + function.name);
                 if (ins.symbol == "$cmpimm" && ins.opcode != Opcode::branch_i1 && !is_integer_comparison(ins.opcode))
                     error(diagnostics, "immediate comparison on unsupported opcode in @" + function.name);
+                if (ins.symbol == "$testimm" && ins.opcode != Opcode::branch_i1 && ins.opcode != Opcode::select_i32 && ins.opcode != Opcode::select_i64)
+                    error(diagnostics, "test-immediate branch form on unsupported opcode in @" + function.name);
+                if (ins.symbol == "$flags" && ins.opcode != Opcode::branch_i1)
+                    error(diagnostics, "arithmetic-flags branch form on unsupported opcode in @" + function.name);
                 if (ins.symbol == "$fcmp" && ins.opcode != Opcode::branch_i1)
                     error(diagnostics, "floating comparison branch form on unsupported opcode in @" + function.name);
                 if ((ins.symbol == "$retimm" || ins.symbol == "$retloadstack") && ins.opcode != Opcode::return_i32 && ins.opcode != Opcode::return_i64)

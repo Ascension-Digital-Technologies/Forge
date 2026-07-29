@@ -40,6 +40,14 @@ Natural loops are identified from dominator-backed CFG backedges. Each loop reco
 
 `LoopInvariantCodeMotionPass` hoists non-trapping operations from canonical loop headers when every SSA operand is defined outside the loop or was already proven invariant. It does not hoist loads, calls, division, remainder, or operations with side effects.
 
+## Broad scalar cleanup
+
+Forge canonicalizes commutative integer expressions and inverse comparison predicates for common-subexpression elimination. For example, `a < b` and `b > a` share one dominating predicate. Scalar cleanup simplifies neutral or self-canceling operations, including `x - x`, `x ^ x`, `x & x`, `x | x`, integer division/remainder by one, multiplication by negative one, double `neg`/`not`, all-bits `and/or`, XOR with all-bits-one, and redundant integer selects. Integer self-comparisons are folded when their result is independent of runtime data.
+
+Dominance-aware CSE also reuses repeated pure address calculations (`global.address`, `ptr.offset`, and `field.address`) and identical integer selections. This reduces duplicated address arithmetic and merge work without forwarding loads or crossing memory side effects.
+
+At `-O2` and `-O3`, Forge runs a second SCCP/algebraic/CSE cleanup wave after memory promotion, if-conversion, and merge simplification. This exposes optimization opportunities created by earlier structural passes instead of requiring each transform to duplicate cleanup logic.
+
 ## Standard pipelines
 
 - `-O0`: no optimization passes.
@@ -49,3 +57,7 @@ Natural loops are identified from dominator-backed CFG backedges. Each loop reco
 - `-Os` and `-Oz`: retain code-size-oriented pipelines.
 
 Pass reports remain available through `forge-opt --stats --pass-timing` and `forge compile --pass-stats`.
+
+### Constant-trip loop unrolling (`-O3`)
+
+Forge eliminates small canonical counted loops when the initial value, limit, and positive stride are compile-time constants. The transform is limited to side-effect-free bodies of at most eight operations and at most eight iterations. Dynamic loops, trapping operations, calls, memory accesses, irregular exits, and larger loops remain unchanged. This keeps code growth predictable while exposing the unrolled body to SCCP, algebraic simplification, copy propagation, and dead-code elimination.

@@ -1,6 +1,6 @@
 # Release readiness
 
-Forge 2.0.0 is a stable release of the documented compiler core, frontend SDK, ABI-classification API, native library workflows, and x86-64 scalar/pointer backend.
+Forge 2.0.0, released July 29, 2026, is a stable release of the documented compiler core, frontend SDK, ABI-classification API, native library workflows, and x86-64 scalar/pointer backend.
 
 ## Required release gates
 
@@ -58,3 +58,7 @@ ABI classification is production-supported as an analysis API. Full register-cla
 ### Sanitizer boundary
 
 Forge 2.0.0 uses two explicit gates. The strict production matrix runs all 66 tests, including JIT execution and installed C/C++ consumers. The ASan/UBSan core matrix runs 56 sanitizer-safe tests and excludes only dynamic entry into uninstrumented generated code plus separately linked installed-consumer processes. Both matrices pass on the release source.
+
+## Release artifacts
+
+`scripts/release-gate.sh` and `scripts/release-gate.ps1` now build the strict release matrix, verify the reported `2.0.0` version, generate binary and source packages with CPack, and write `_packages/SHA256SUMS`. A release is incomplete unless the strict tests, installed-consumer tests, package creation, and checksums all succeed.

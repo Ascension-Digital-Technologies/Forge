@@ -92,8 +92,8 @@ module @abi_hardening {
         *lowered.module, forge::codegen::x86_64::Abi::system_v);
     require(sysv.ok(), "System V ABI encoding failed");
     const auto& sysv_stress = find_function(sysv, "abi_stress");
-    require(sysv_stress.abi_register_argument_snapshot_count == 6,
-            "System V call did not snapshot all register arguments");
+    require(sysv_stress.abi_register_argument_snapshot_count == 0,
+            "System V call retained floating register snapshots after parallel-copy lowering");
     require(sysv_stress.abi_stack_argument_count == 0,
             "System V unexpectedly stack-passed the six mixed arguments");
     require(sysv_stress.abi_shadow_space_byte_count == 0,
@@ -105,8 +105,8 @@ module @abi_hardening {
         *lowered.module, forge::codegen::x86_64::Abi::windows);
     require(windows.ok(), "Windows x64 ABI encoding failed");
     const auto& windows_stress = find_function(windows, "abi_stress");
-    require(windows_stress.abi_register_argument_snapshot_count == 4,
-            "Windows x64 did not snapshot the four register arguments");
+    require(windows_stress.abi_register_argument_snapshot_count == 0,
+            "Windows x64 retained floating register snapshots after parallel-copy lowering");
     require(windows_stress.abi_stack_argument_count == 2,
             "Windows x64 did not place arguments five and six on the stack");
     require(windows_stress.abi_shadow_space_byte_count == 32,

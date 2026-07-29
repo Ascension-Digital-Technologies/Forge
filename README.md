@@ -261,7 +261,7 @@ The release matrix installs Forge into an isolated prefix and builds independent
 
 ## Optimizer and analysis
 
-Forge ships reusable function analyses and a deterministic scalar optimization pipeline. Forge 1.3 adds conservative alias analysis and natural-loop discovery, allowing the optimizer to forward memory values across proven-disjoint stores and hoist safe loop-invariant expressions from canonical loop headers.
+Forge ships reusable function analyses and a deterministic scalar optimization pipeline. At `-O2` and `-O3`, late scalar cleanup now runs to a bounded fixpoint so opportunities exposed by memory, loop, and CFG transforms are consumed without unbounded compile-time growth. Forge 2.0 includes conservative alias analysis, global memory dataflow, loop-capable mem2reg, and natural-loop discovery, allowing the optimizer to promote scalar locals, forward values across CFG edges, eliminate overwritten stores, and hoist safe loop-invariant expressions.
 
 ```text
 CFG + dominators + use/def
@@ -294,11 +294,10 @@ Forge 2.0.0 is the stabilized production release of the compiler core, frontend 
 
 The following are not currently part of the supported surface:
 
-- Register-classified by-value aggregate machine lowering (classification is available)
 - True variadic function definitions (external/signature metadata is available)
 - Per-function mixed calling conventions in one emitted object
 - Unwind and debug metadata
-- Segmented live-range register allocation
+- Full arbitrary live-range splitting beyond the current call-boundary and CFG-aware splitting infrastructure
 - Architectures other than x86-64
 
 See [docs/release-readiness.md](docs/release-readiness.md) for the release contract and [docs/roadmap.md](docs/roadmap.md) for planned work.

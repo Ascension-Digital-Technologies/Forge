@@ -726,6 +726,17 @@ Diagnostics verify_module(const Module& module) {
                             "comparison requires matching supported numeric operands in block " + current.name, {}});
                     }
                 }
+                if (operation.opcode == "select") {
+                    const auto condition = operand_type(0);
+                    const auto when_true = operand_type(1);
+                    const auto when_false = operand_type(2);
+                    if (operation.operands.size() != 3 || condition != Type(TypeKind::i1) ||
+                        when_true != operation.type || when_false != operation.type ||
+                        (!operation.type.is_integer() && operation.type != Type(TypeKind::ptr))) {
+                        diagnostics.push_back({DiagnosticSeverity::error,
+                            "select requires i1 condition and matching integer operands in block " + current.name, {}});
+                    }
+                }
                 if (operation.opcode == "add" || operation.opcode == "sub" || operation.opcode == "mul" || operation.opcode == "div") {
                     const auto left = operand_type(0);
                     const auto right = operand_type(1);

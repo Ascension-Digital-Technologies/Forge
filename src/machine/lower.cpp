@@ -398,6 +398,31 @@ LowerResult lower_module(const ir::Module& source) {
                                 (type == ir::Type(ir::TypeKind::i64) || type == ir::Type(ir::TypeKind::ptr)) ? Opcode::load_argument_i64 : Opcode::load_argument;
             entry.instructions.push_back({opcode, registers.at(parameter.name), {}, 0, argument_index++, {}, {}});
         }
+        // Entry argument loads form parallel ABI copies. Emit each contiguous
+        // pure load run in reverse ABI order so high argument registers (r8/r9
+        // on x86-64) are consumed before earlier loads can be allocated into
+        // and overwrite them. Aggregate reconstruction instructions naturally
+        // split the runs, preserving their dependencies. The encoder retains a
+        // selective snapshot fallback for the rare cycles this ordering cannot
+        // resolve.
+        const auto is_argument_load = [](Opcode opcode) {
+            return opcode == Opcode::load_argument || opcode == Opcode::load_argument_i64;
+        };
+        for (std::size_t begin = 0; begin < entry.instructions.size();) {
+            if (!is_argument_load(entry.instructions[begin].opcode)) {
+                ++begin;
+                continue;
+            }
+            auto end = begin + 1U;
+            while (end < entry.instructions.size() && is_argument_load(entry.instructions[end].opcode)) ++end;
+            std::stable_sort(entry.instructions.begin() + static_cast<std::ptrdiff_t>(begin),
+                             entry.instructions.begin() + static_cast<std::ptrdiff_t>(end),
+                             [](const Instruction& left, const Instruction& right) {
+                                 return left.argument_index > right.argument_index;
+                             });
+            begin = end;
+        }
+
         for (std::size_t parameter_index = 0; parameter_index < function.parameters.size(); ++parameter_index) {
             const auto& parameter = function.parameters[parameter_index];
             if (!parameter.owned || aggregate_parameters[parameter_index].direct) continue;
@@ -1036,6 +1061,7 @@ LowerResult lower_module(const ir::Module& source) {
                             instruction.immediate = static_cast<std::int64_t>((integer_width(source->second) << 8U) | integer_width(operation.type));
                         }
                     }
+                    else if (operation.opcode == "select") instruction.opcode = wide_value ? Opcode::select_i64 : Opcode::select_i32;
                     else if (operation.opcode == "add") instruction.opcode = float_value ? (wide_float ? Opcode::add_f64 : Opcode::add_f32) : (wide_value ? Opcode::add_i64 : Opcode::add_i32);
                     else if (operation.opcode == "sub") instruction.opcode = float_value ? (wide_float ? Opcode::sub_f64 : Opcode::sub_f32) : (wide_value ? Opcode::sub_i64 : Opcode::sub_i32);
                     else if (operation.opcode == "mul") instruction.opcode = float_value ? (wide_float ? Opcode::mul_f64 : Opcode::mul_f32) : (wide_value ? Opcode::mul_i64 : Opcode::mul_i32);
@@ -1067,7 +1093,7 @@ LowerResult lower_module(const ir::Module& source) {
                     }
                     if (!failed && instruction.opcode != Opcode::load_immediate && instruction.opcode != Opcode::load_immediate_i64 && instruction.opcode != Opcode::load_immediate_f32 && instruction.opcode != Opcode::load_immediate_f64) {
                         if (!append_inputs(operation, registers, instruction, result.diagnostics, function.name)) failed = true;
-                        const auto expected = (instruction.opcode == Opcode::copy || instruction.opcode == Opcode::copy_f32 || instruction.opcode == Opcode::copy_f64 || instruction.opcode == Opcode::neg_f32 || instruction.opcode == Opcode::neg_f64 || instruction.opcode == Opcode::neg_i32 || instruction.opcode == Opcode::neg_i64 || instruction.opcode == Opcode::not_i32 || instruction.opcode == Opcode::not_i64 || instruction.opcode == Opcode::zero_extend || instruction.opcode == Opcode::sign_extend || instruction.opcode == Opcode::truncate) ? 1U : 2U;
+                        const auto expected = (instruction.opcode == Opcode::select_i32 || instruction.opcode == Opcode::select_i64) ? 3U : (instruction.opcode == Opcode::copy || instruction.opcode == Opcode::copy_f32 || instruction.opcode == Opcode::copy_f64 || instruction.opcode == Opcode::neg_f32 || instruction.opcode == Opcode::neg_f64 || instruction.opcode == Opcode::neg_i32 || instruction.opcode == Opcode::neg_i64 || instruction.opcode == Opcode::not_i32 || instruction.opcode == Opcode::not_i64 || instruction.opcode == Opcode::zero_extend || instruction.opcode == Opcode::sign_extend || instruction.opcode == Opcode::truncate) ? 1U : 2U;
                         if (!failed && instruction.inputs.size() != expected) {
                             error(result.diagnostics, "invalid operand count during lowering in @" + function.name);
                             failed = true;

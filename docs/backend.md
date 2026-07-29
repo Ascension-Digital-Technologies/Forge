@@ -19,7 +19,7 @@ The allocator currently assigns one location to each virtual register for its co
 
 ## Calling conventions
 
-Call marshaling snapshots every register-bound argument before writing any ABI destination. This prevents cycles and reordered XMM/GPR assignments from clobbering later arguments.
+Call marshaling uses a shared parallel-copy planner for GPR and XMM arguments. Acyclic placements move directly, reciprocal integer cycles use `xchg`, larger homogeneous cycles use one scratch register, and only unresolved heterogeneous components use a local stack fallback. Stack-passed arguments are written before ABI destinations are modified.
 
 ### System V AMD64
 
@@ -47,6 +47,7 @@ The machine optimizer and encoder support:
 - Signed/unsigned comparisons and NaN-correct floating predicates
 - Compare/branch fusion
 - Immediate arithmetic, shifts, comparisons, returns, and memory stores
+- Scaled-`LEA` and shift strength reduction for constant multipliers factored as `1`, `3`, `5`, or `9` times a power of two
 - Stack memory-source arithmetic and load/return folding
 - x86 base-plus-disp32 address modes
 - Floating zero idioms

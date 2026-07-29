@@ -71,6 +71,8 @@ enum class Opcode : std::uint8_t {
     or_i64,
     xor_i32,
     xor_i64,
+    select_i32,
+    select_i64,
     shl_i32,
     shl_i64,
     shr_s_i32,
