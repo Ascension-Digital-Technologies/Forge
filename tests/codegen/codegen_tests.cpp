@@ -176,6 +176,9 @@ entry:
 
         forge::machine::Function floating_leaf;
         floating_leaf.name = "floating_leaf";
+        floating_leaf.argument_count = 4;
+        floating_leaf.argument_widths.assign(4, 8);
+        floating_leaf.argument_classes.assign(4, forge::machine::RegisterClass::floating);
         floating_leaf.register_count = 7;
         floating_leaf.register_widths = {8, 8, 8, 8, 8, 8, 8};
         floating_leaf.register_classes.assign(7, forge::machine::RegisterClass::floating);
@@ -192,16 +195,19 @@ entry:
             instruction.immediate = immediate;
             return instruction;
         };
-        floating_entry.instructions = {
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 0, {}, 0x3ff0000000000000LL),
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 1, {}, 0x4000000000000000LL),
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 2, {}, 0x4008000000000000LL),
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 3, {}, 0x4010000000000000LL),
-            make_float_instruction(forge::machine::Opcode::add_f64, 4, {0, 1}),
-            make_float_instruction(forge::machine::Opcode::mul_f64, 5, {2, 3}),
-            make_float_instruction(forge::machine::Opcode::add_f64, 6, {4, 5}),
-            make_float_instruction(forge::machine::Opcode::return_f64, 0, {6}),
-        };
+        for (std::uint32_t argument = 0; argument < 4; ++argument) {
+            auto load = make_float_instruction(forge::machine::Opcode::load_argument_f64, argument, {});
+            load.argument_index = argument;
+            floating_entry.instructions.push_back(std::move(load));
+        }
+        floating_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::add_f64, 4, {0, 1}));
+        floating_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::mul_f64, 5, {2, 3}));
+        floating_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::add_f64, 6, {4, 5}));
+        floating_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::return_f64, 0, {6}));
         floating_leaf.blocks.push_back(std::move(floating_entry));
         const auto floating_baseline = forge::machine::allocate_stack_slots(floating_leaf);
         const auto floating_allocation = forge::machine::allocate_linear_scan(floating_leaf);
@@ -227,15 +233,19 @@ entry:
         // assigned synthetic stack homes merely because they are arguments.
         forge::machine::Function floating_call_arguments;
         floating_call_arguments.name = "floating_call_arguments";
+        floating_call_arguments.argument_count = 2;
+        floating_call_arguments.argument_widths.assign(2, 8);
+        floating_call_arguments.argument_classes.assign(2, forge::machine::RegisterClass::floating);
         floating_call_arguments.register_count = 3;
         floating_call_arguments.register_widths = {8, 8, 8};
         floating_call_arguments.register_classes.assign(3, forge::machine::RegisterClass::floating);
         forge::machine::Block floating_call_entry;
         floating_call_entry.name = "entry";
-        floating_call_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 0, {}, 0x3ff0000000000000LL));
-        floating_call_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 1, {}, 0x4000000000000000LL));
+        for (std::uint32_t argument = 0; argument < 2; ++argument) {
+            auto load = make_float_instruction(forge::machine::Opcode::load_argument_f64, argument, {});
+            load.argument_index = argument;
+            floating_call_entry.instructions.push_back(std::move(load));
+        }
         auto floating_call = make_float_instruction(forge::machine::Opcode::call_f64, 2, {0, 1});
         floating_call.symbol = "callee";
         floating_call_entry.instructions.push_back(std::move(floating_call));
@@ -250,12 +260,15 @@ entry:
 
         forge::machine::Function weighted_pressure;
         weighted_pressure.name = "weighted_pressure";
-        weighted_pressure.register_count = 10;
-        weighted_pressure.register_widths.assign(10, 8);
-        weighted_pressure.register_classes.assign(10, forge::machine::RegisterClass::integer);
+        // Leaf allocation now has eleven GPRs (including rdi/rsi), so keep the
+        // fixture one value above capacity. The test is about spill weighting,
+        // not a historical register-pool size.
+        weighted_pressure.register_count = 12;
+        weighted_pressure.register_widths.assign(12, 8);
+        weighted_pressure.register_classes.assign(12, forge::machine::RegisterClass::integer);
         forge::machine::Block weighted_entry;
         weighted_entry.name = "entry";
-        for (forge::machine::VirtualRegister reg = 0; reg < 9; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 11; ++reg)
             weighted_entry.instructions.push_back(
                 make_float_instruction(forge::machine::Opcode::load_immediate_i64, reg, {}, reg + 1));
         const auto add_store = [&](forge::machine::VirtualRegister reg, std::int64_t offset) {
@@ -271,24 +284,26 @@ entry:
         add_store(7, 48);
         add_store(8, 56);
         add_store(9, 64);
-        add_store(9, 72);
-        add_store(9, 80);
-        add_store(9, 88);
+        add_store(10, 72);
+        add_store(11, 80);
+        add_store(11, 88);
+        add_store(11, 96);
+        add_store(11, 104);
         weighted_entry.instructions.push_back(
             make_float_instruction(forge::machine::Opcode::return_i64, 0, {0}));
-        weighted_pressure.local_stack_size = 96;
+        weighted_pressure.local_stack_size = 112;
         weighted_pressure.blocks.push_back(std::move(weighted_entry));
         const auto weighted_allocation = forge::machine::allocate_linear_scan(weighted_pressure);
         require(weighted_allocation.ok(), "weighted pressure allocation failed");
         require(weighted_allocation.spill_count == 1, "weighted pressure fixture did not create one spill");
-        require(weighted_allocation.location(9).kind == forge::machine::LocationKind::physical_register,
+        require(weighted_allocation.location(11).kind == forge::machine::LocationKind::physical_register,
                 "hot integer value was spilled instead of retained");
-        require(weighted_allocation.intervals[9].use_count >= 4,
+        require(weighted_allocation.intervals[11].use_count >= 4,
                 "hot integer use frequency was not recorded");
-        require(weighted_allocation.intervals[9].spill_weight > weighted_allocation.intervals[1].spill_weight,
+        require(weighted_allocation.intervals[11].spill_weight > weighted_allocation.intervals[1].spill_weight,
                 "spill weighting did not distinguish hot and cold values");
         bool cold_value_spilled = false;
-        for (forge::machine::VirtualRegister reg = 0; reg < 10; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 12; ++reg)
             cold_value_spilled = cold_value_spilled ||
                 weighted_allocation.location(reg).kind == forge::machine::LocationKind::stack_slot ||
                 weighted_allocation.location(reg).kind == forge::machine::LocationKind::rematerialized_integer;
@@ -603,6 +618,9 @@ entry:
 
         forge::machine::Function copy_chain;
         copy_chain.name = "copy_chain";
+        copy_chain.argument_count = 1;
+        copy_chain.argument_widths = {8};
+        copy_chain.argument_classes = {forge::machine::RegisterClass::floating};
         copy_chain.register_count = 6;
         copy_chain.register_widths = {8, 8, 8, 8, 8, 8};
         copy_chain.register_classes = {
@@ -615,11 +633,12 @@ entry:
             make_float_instruction(forge::machine::Opcode::load_immediate_i64, 0, {}, 42),
             make_float_instruction(forge::machine::Opcode::copy, 1, {0}),
             make_float_instruction(forge::machine::Opcode::copy, 2, {1}),
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 3, {}, 0x4008000000000000LL),
+            make_float_instruction(forge::machine::Opcode::load_argument_f64, 3, {}),
             make_float_instruction(forge::machine::Opcode::copy_f64, 4, {3}),
             make_float_instruction(forge::machine::Opcode::copy_f64, 5, {4}),
             make_float_instruction(forge::machine::Opcode::return_i64, 0, {2}),
         };
+        copy_entry.instructions[3].argument_index = 0;
         copy_chain.blocks.push_back(std::move(copy_entry));
         auto optimized_copy_chain = copy_chain;
         const auto machine_cleanup = forge::machine::optimize_function(optimized_copy_chain);
@@ -692,26 +711,26 @@ entry:
         forge::machine::Function encoded_pressure;
         encoded_pressure.name = "encoded_pressure";
         // Keep enough simultaneously live values to exercise spill encoding
-        // with the full nine-register integer pool.
+        // with the full eleven-register leaf integer pool.
         // This fixture exercises register pressure using immediates only. Do not
         // declare unused ABI arguments: on Windows an unconsumed third argument
         // lives in r8 and correctly requires an encoder capture area, which would
         // make this allocator-frame metric test ABI-dependent.
-        encoded_pressure.register_count = 19;
-        encoded_pressure.register_widths.assign(19, 8);
-        encoded_pressure.register_classes.assign(19, forge::machine::RegisterClass::integer);
+        encoded_pressure.register_count = 23;
+        encoded_pressure.register_widths.assign(23, 8);
+        encoded_pressure.register_classes.assign(23, forge::machine::RegisterClass::integer);
         forge::machine::Block encoded_pressure_entry;
         encoded_pressure_entry.name = "entry";
-        for (forge::machine::VirtualRegister reg = 0; reg < 10; ++reg)
+        for (forge::machine::VirtualRegister reg = 0; reg < 12; ++reg)
             encoded_pressure_entry.instructions.push_back(
                 make_float_instruction(forge::machine::Opcode::load_immediate_i64, reg, {}, reg + 1));
         encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::add_i64, 10, {0, 1}));
-        for (forge::machine::VirtualRegister reg = 11; reg < 19; ++reg)
+            make_float_instruction(forge::machine::Opcode::add_i64, 12, {0, 1}));
+        for (forge::machine::VirtualRegister reg = 13; reg < 23; ++reg)
             encoded_pressure_entry.instructions.push_back(
-                make_float_instruction(forge::machine::Opcode::add_i64, reg, {reg - 1, reg - 9}));
+                make_float_instruction(forge::machine::Opcode::add_i64, reg, {reg - 1, reg - 11}));
         encoded_pressure_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::return_i64, 0, {18}));
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {22}));
         encoded_pressure.blocks.push_back(std::move(encoded_pressure_entry));
         const auto encoded_pressure_allocation = forge::machine::allocate_linear_scan(encoded_pressure);
         require(encoded_pressure_allocation.ok(), "encoded pressure allocation failed");
@@ -754,6 +773,9 @@ entry:
 
         forge::machine::Function unary_reuse;
         unary_reuse.name = "unary_reuse";
+        unary_reuse.argument_count = 1;
+        unary_reuse.argument_widths = {8};
+        unary_reuse.argument_classes = {forge::machine::RegisterClass::floating};
         unary_reuse.register_count = 4;
         unary_reuse.register_widths = {8, 8, 8, 8};
         unary_reuse.register_classes = {
@@ -765,8 +787,10 @@ entry:
             make_float_instruction(forge::machine::Opcode::load_immediate_i64, 0, {}, 9));
         unary_entry.instructions.push_back(
             make_float_instruction(forge::machine::Opcode::neg_i64, 1, {0}));
-        unary_entry.instructions.push_back(
-            make_float_instruction(forge::machine::Opcode::load_immediate_f64, 2, {}, 0x400c000000000000LL));
+        auto unary_float_argument =
+            make_float_instruction(forge::machine::Opcode::load_argument_f64, 2, {});
+        unary_float_argument.argument_index = 0;
+        unary_entry.instructions.push_back(std::move(unary_float_argument));
         unary_entry.instructions.push_back(
             make_float_instruction(forge::machine::Opcode::neg_f64, 3, {2}));
         unary_entry.instructions.push_back(

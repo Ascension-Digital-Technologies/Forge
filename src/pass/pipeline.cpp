@@ -42,6 +42,15 @@ void build_standard_pipeline(PassManager& pipeline, OptimizationLevel level) {
             .add<transforms::DeadStoreEliminationPass>()
             .add<transforms::IfConversionPass>()
             .add<transforms::MergeParameterSimplificationPass>()
+            .add<transforms::SimplifyCFGPass>()
+            .add<transforms::LoopInvariantCodeMotionPass>()
+            // Canonicalize/collapse the scalar loop body before estimating
+            // runtime-unroll profitability.  If-conversion and CFG merging can
+            // leave dead copies/duplicate expressions that disappear one pass
+            // later; counting those transient operations makes profitable
+            // loops look artificially expensive.
+            .add<transforms::ScalarCleanupFixpointPass>()
+            .add<transforms::RuntimeCountedLoopUnrollPass>()
             .add<transforms::SparseConditionalConstantPropagationPass>()
             .add<transforms::AlgebraicSimplificationPass>()
             .add<transforms::CommonSubexpressionEliminationPass>()
@@ -72,6 +81,11 @@ void build_standard_pipeline(PassManager& pipeline, OptimizationLevel level) {
                 .add<transforms::DeadStoreEliminationPass>()
                 .add<transforms::IfConversionPass>()
                 .add<transforms::MergeParameterSimplificationPass>()
+                .add<transforms::SimplifyCFGPass>()
+                // Runtime counted loops were already handled in the common O2+
+                // pipeline. Running the pass again here would unroll the scalar
+                // cleanup loop a second time and inflate O3 code without exposing
+                // new iteration-level parallelism.
                 .add<transforms::SparseConditionalConstantPropagationPass>()
                 .add<transforms::AlgebraicSimplificationPass>()
                 .add<transforms::CommonSubexpressionEliminationPass>()

@@ -12,6 +12,8 @@
 namespace forge::machine {
 
 enum class PhysicalRegister : std::uint8_t {
+    edi,
+    esi,
     r8d,
     r9d,
     ebx,
@@ -24,7 +26,8 @@ enum class PhysicalRegister : std::uint8_t {
 };
 
 [[nodiscard]] constexpr bool is_call_clobbered(PhysicalRegister reg) noexcept {
-    return reg == PhysicalRegister::r8d || reg == PhysicalRegister::r9d ||
+    return reg == PhysicalRegister::edi || reg == PhysicalRegister::esi ||
+           reg == PhysicalRegister::r8d || reg == PhysicalRegister::r9d ||
            reg == PhysicalRegister::r10d || reg == PhysicalRegister::r11d;
 }
 

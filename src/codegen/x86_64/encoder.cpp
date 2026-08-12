@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -58,6 +59,8 @@ enum class XmmRegister : std::uint8_t { xmm0 = 0, xmm1 = 1, xmm2 = 2, xmm3 = 3, 
 
 Register integer_register(machine::PhysicalRegister reg) {
     switch (reg) {
+    case machine::PhysicalRegister::edi: return Register::edi;
+    case machine::PhysicalRegister::esi: return Register::esi;
     case machine::PhysicalRegister::r8d: return Register::r8d;
     case machine::PhysicalRegister::r9d: return Register::r9d;
     case machine::PhysicalRegister::ebx: return Register::ebx;
@@ -98,8 +101,17 @@ void emit_sse_stack_store(Buffer& out, XmmRegister source, std::int32_t displace
     out.i32(displacement);
 }
 void emit_ptr_modrm(Buffer& out, std::uint8_t reg, Register pointer, std::int32_t displacement) {
-    emit_modrm(out, displacement == 0 ? 0 : 2, reg, static_cast<std::uint8_t>(pointer));
-    if (displacement != 0) out.i32(displacement);
+    const auto base = static_cast<std::uint8_t>(pointer);
+    const auto low_base = static_cast<std::uint8_t>(base & 7U);
+    const bool requires_sib = low_base == 4U; // rsp/r12
+    const bool zero_displacement_forbidden = low_base == 5U; // rbp/r13
+    const bool short_displacement = displacement >= -128 && displacement <= 127;
+    const auto mod = displacement == 0 && !zero_displacement_forbidden ? 0U :
+                     short_displacement ? 1U : 2U;
+    emit_modrm(out, static_cast<std::uint8_t>(mod), reg, low_base);
+    if (requires_sib) out.byte(0x24); // no index, base=rsp/r12
+    if (mod == 1U) out.byte(static_cast<std::uint8_t>(displacement));
+    else if (mod == 2U) out.i32(displacement);
 }
 void emit_sse_ptr_load(Buffer& out, XmmRegister destination, Register pointer, bool wide, std::int32_t displacement = 0) {
     const auto dst = static_cast<std::uint8_t>(destination);
@@ -117,6 +129,14 @@ void emit_sse_ptr_store(Buffer& out, Register pointer, XmmRegister source, bool 
     out.byte(0x0F); out.byte(0x11);
     emit_ptr_modrm(out, src, pointer, displacement);
 }
+void emit_sse_rip_load_placeholder(Buffer& out, XmmRegister destination, bool wide) {
+    const auto dst = static_cast<std::uint8_t>(destination);
+    out.byte(wide ? 0xF2 : 0xF3);
+    if (dst >= 8U) out.byte(0x44);
+    out.byte(0x0F); out.byte(0x10);
+    emit_modrm(out, 0, dst, 5); // [rip + disp32]
+    out.i32(0);
+}
 void emit_sse_xor(Buffer& out, XmmRegister destination, XmmRegister source, bool wide) {
     if (wide) out.byte(0x66);
     out.byte(0x0F); out.byte(0x57);
@@ -126,6 +146,16 @@ void emit_sse_xor(Buffer& out, XmmRegister destination, XmmRegister source, bool
 void emit_sse_binary(Buffer& out, XmmRegister destination, XmmRegister source, bool wide, std::uint8_t opcode) {
     out.byte(wide ? 0xF2 : 0xF3); out.byte(0x0F); out.byte(opcode);
     emit_modrm(out, 3, static_cast<std::uint8_t>(destination), static_cast<std::uint8_t>(source));
+}
+void emit_sse_binary_ptr(Buffer& out, XmmRegister destination, Register pointer, bool wide,
+                         std::uint8_t opcode, std::int32_t displacement = 0) {
+    const auto dst = static_cast<std::uint8_t>(destination);
+    const auto ptr = static_cast<std::uint8_t>(pointer);
+    out.byte(wide ? 0xF2 : 0xF3);
+    if (dst >= 8U || ptr >= 8U)
+        out.byte(static_cast<std::uint8_t>(0x40U | (dst >= 8U ? 0x04U : 0U) | (ptr >= 8U ? 0x01U : 0U)));
+    out.byte(0x0F); out.byte(opcode);
+    emit_ptr_modrm(out, dst, pointer, displacement);
 }
 void emit_ucomi(Buffer& out, XmmRegister left, XmmRegister right, bool wide) {
     if (wide) out.byte(0x66);
@@ -460,6 +490,8 @@ void emit_adjust_rsp(Buffer& out, bool subtract, std::uint32_t amount) {
 
 Register physical_register(machine::PhysicalRegister physical) {
     switch (physical) {
+    case machine::PhysicalRegister::edi: return Register::edi;
+    case machine::PhysicalRegister::esi: return Register::esi;
     case machine::PhysicalRegister::r8d: return Register::r8d;
     case machine::PhysicalRegister::r9d: return Register::r9d;
     case machine::PhysicalRegister::ebx: return Register::ebx;
@@ -549,6 +581,18 @@ void emit_cmp_register_immediate(Buffer& out, Register left, std::int32_t value,
 
 void emit_test_register_immediate(Buffer& out, Register source, std::int32_t value, bool wide) {
     const auto reg = static_cast<std::uint8_t>(source);
+    // A mask confined to the low byte has identical zero/nonzero semantics
+    // with TEST r8, imm8 and saves three bytes versus the imm32 form.  REX is
+    // required for sil/dil and r8b-r15b; allocator registers never use ah-ch.
+    if (value >= 0 && value <= 0xFF) {
+        const bool needs_rex = reg >= 4U;
+        if (needs_rex)
+            out.byte(static_cast<std::uint8_t>(0x40U | (reg >= 8U ? 0x01U : 0U)));
+        out.byte(0xF6); // test r/m8, imm8
+        emit_modrm(out, 3, 0, reg);
+        out.byte(static_cast<std::uint8_t>(value));
+        return;
+    }
     const auto rex = static_cast<std::uint8_t>((wide ? 0x48U : 0x40U) | (reg >= 8U ? 0x01U : 0U));
     if (rex != 0x40U) out.byte(rex);
     out.byte(0xF7); // test r/m32|64, imm32
@@ -668,6 +712,25 @@ void emit_mov_imm32(Buffer& out, Register destination, std::int32_t immediate) {
     emit_rex(out, false, reg >= 8);
     out.byte(static_cast<std::uint8_t>(0xB8U + (reg & 7U)));
     out.i32(immediate);
+}
+
+void emit_integer_ptr_binary(Buffer& out, machine::Opcode opcode, Register destination,
+                             Register pointer, std::int32_t displacement, bool wide) {
+    const auto dst = static_cast<std::uint8_t>(destination);
+    const auto ptr = static_cast<std::uint8_t>(pointer);
+    if (wide) out.byte(static_cast<std::uint8_t>(0x48U | (dst >= 8U ? 0x04U : 0U) |
+                                                 (ptr >= 8U ? 0x01U : 0U)));
+    else emit_rex(out, dst >= 8U, ptr >= 8U);
+    if (opcode == machine::Opcode::mul_i32 || opcode == machine::Opcode::mul_i64) {
+        out.byte(0x0F); out.byte(0xAF);
+    } else {
+        const auto byte = (opcode == machine::Opcode::add_i32 || opcode == machine::Opcode::add_i64) ? 0x03 :
+                          (opcode == machine::Opcode::sub_i32 || opcode == machine::Opcode::sub_i64) ? 0x2B :
+                          (opcode == machine::Opcode::and_i32 || opcode == machine::Opcode::and_i64) ? 0x23 :
+                          (opcode == machine::Opcode::or_i32 || opcode == machine::Opcode::or_i64) ? 0x0B : 0x33;
+        out.byte(byte);
+    }
+    emit_ptr_modrm(out, dst, pointer, displacement);
 }
 
 void emit_integer_stack_binary(Buffer& out, machine::Opcode opcode, Register destination,
@@ -1223,6 +1286,57 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
         const auto argument_index = incoming_argument_index(abi_register);
         if (!argument_index) return false;
 
+        // The encoder consumes a contiguous entry run of integer arguments as
+        // one parallel copy. Destinations inside that run therefore cannot
+        // destroy another incoming source before it is observed; cycle handling
+        // already preserves all sources. Only instructions before the run can
+        // make an r8/r9 snapshot necessary.
+        if (!function.blocks.empty()) {
+            const auto& entry_block = function.blocks.front();
+            std::optional<std::size_t> target_index;
+            for (std::size_t index = 0; index < entry_block.instructions.size(); ++index) {
+                const auto& candidate = entry_block.instructions[index];
+                if ((candidate.opcode == machine::Opcode::load_argument ||
+                     candidate.opcode == machine::Opcode::load_argument_i64) &&
+                    candidate.argument_index == *argument_index) {
+                    target_index = index;
+                    break;
+                }
+            }
+            if (target_index) {
+                auto run_start = *target_index;
+                while (run_start > 0U) {
+                    const auto opcode = entry_block.instructions[run_start - 1U].opcode;
+                    if (opcode != machine::Opcode::load_argument &&
+                        opcode != machine::Opcode::load_argument_i64) break;
+                    --run_start;
+                }
+                bool clobbered_before_run = false;
+                for (std::size_t index = 0; index < run_start && !clobbered_before_run; ++index) {
+                    const auto& earlier = entry_block.instructions[index];
+                    switch (earlier.opcode) {
+                    case machine::Opcode::call_i32: case machine::Opcode::call_i64:
+                    case machine::Opcode::call_f32: case machine::Opcode::call_f64:
+                    case machine::Opcode::call_void: case machine::Opcode::call_aggregate:
+                    case machine::Opcode::call_indirect_i32: case machine::Opcode::call_indirect_i64:
+                    case machine::Opcode::call_indirect_f32: case machine::Opcode::call_indirect_f64:
+                    case machine::Opcode::call_indirect_void:
+                        clobbered_before_run = true;
+                        break;
+                    default:
+                        break;
+                    }
+                    if (clobbered_before_run) break;
+                    if (earlier.result < function.register_count) {
+                        const auto location = allocation.location(earlier.result);
+                        clobbered_before_run = location.kind == machine::LocationKind::physical_register &&
+                                               location.physical == physical;
+                    }
+                }
+                if (!clobbered_before_run) return false;
+            }
+        }
+
         for (const auto& block : function.blocks) {
             for (const auto& instruction : block.instructions) {
                 const bool is_target_load =
@@ -1286,11 +1400,9 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
     encoded.split_transition_byte_count = split_stats.transition_bytes;
 
     const auto callee_saved = used_callee_saved_registers(allocation);
-    // A frame pointer is only required when this function has rbp-relative
-    // storage. Calls alone do not require one: call-site alignment is computed
-    // from the actual fixed stack depth below. This keeps small wrappers and
-    // call-heavy leaf-like functions frameless while preserving unwind-neutral
-    // callee-saved pushes and ABI alignment.
+    // Incoming stack arguments have fixed locations relative to rsp after the
+    // prologue, so they do not by themselves require an rbp frame. Actual local
+    // or spill storage still keeps rbp-relative addressing unchanged.
     const bool omit_frame_pointer = encoded_frame_size == 0U;
     if (omit_frame_pointer) {
         encoded.leaf_frame_elided_count = 1U;
@@ -1301,10 +1413,66 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
         return encoded;
     }
 
+    // Reserve one outgoing call area for the whole function instead of
+    // subtracting and restoring rsp around every call. Besides shrinking
+    // call-heavy code, this removes a serial stack-pointer dependency from hot
+    // call chains. The reservation is sized for the largest call site; smaller
+    // calls simply use the low portion of the same ABI-aligned area.
+    std::uint32_t maximum_raw_call_area = 0U;
+    std::uint32_t call_site_count = 0U;
+    for (const auto& block : function.blocks) {
+        for (const auto& instruction : block.instructions) {
+            bool is_call = false;
+            bool aggregate_call = false;
+            std::size_t first_argument = 0U;
+            switch (instruction.opcode) {
+            case machine::Opcode::call_i32: case machine::Opcode::call_i64:
+            case machine::Opcode::call_f32: case machine::Opcode::call_f64:
+            case machine::Opcode::call_void:
+                is_call = true;
+                break;
+            case machine::Opcode::call_aggregate:
+                is_call = true;
+                aggregate_call = true;
+                first_argument = 1U;
+                break;
+            case machine::Opcode::call_indirect_i32: case machine::Opcode::call_indirect_i64:
+            case machine::Opcode::call_indirect_f32: case machine::Opcode::call_indirect_f64:
+            case machine::Opcode::call_indirect_void:
+                is_call = true;
+                first_argument = 1U;
+                break;
+            default:
+                break;
+            }
+            if (!is_call || instruction.inputs.size() < first_argument) continue;
+            std::vector<machine::RegisterClass> classes;
+            classes.reserve(instruction.inputs.size() - first_argument);
+            for (std::size_t index = first_argument; index < instruction.inputs.size(); ++index)
+                classes.push_back(function.register_classes[instruction.inputs[index]]);
+            const auto placements = classify_arguments(classes, abi);
+            std::uint32_t stack_count = 0U;
+            for (const auto& placement : placements)
+                if (placement.kind == AbiPlacement::Kind::stack)
+                    stack_count = std::max(stack_count, placement.stack_index + 1U);
+            const auto stack_base = abi == Abi::windows ? 32U : 0U;
+            const auto raw_area = stack_base + stack_count * 8U + (aggregate_call ? 8U : 0U);
+            maximum_raw_call_area = std::max(maximum_raw_call_area, raw_area);
+            ++call_site_count;
+        }
+    }
+    const auto fixed_call_depth = static_cast<std::uint32_t>(
+        callee_saved.size() * 8U + (omit_frame_pointer ? 8U : 16U));
+    const auto reserved_call_padding = call_site_count == 0U ? 0U :
+        (16U - ((fixed_call_depth + maximum_raw_call_area) & 15U)) & 15U;
+    const auto reserved_call_area = maximum_raw_call_area + reserved_call_padding;
+
     std::unordered_map<std::string, const machine::Block*> blocks;
     for (const auto& block : function.blocks) blocks.emplace(block.name, &block);
 
     Buffer out;
+    struct FloatingLiteralFixup { std::size_t displacement_offset{}; std::uint64_t bits{}; bool wide{}; };
+    std::vector<FloatingLiteralFixup> floating_literal_fixups;
     struct SpillCacheState {
         std::optional<std::int32_t> offset;
         std::optional<machine::VirtualRegister> owner;
@@ -1329,6 +1497,10 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
     // loading it back.  This applies uniformly to direct and indirect integer
     // and floating-point calls.
     std::vector<bool> direct_call_return(function.register_count, false);
+    // Direct calls in true tail position can restore this function's frame and
+    // jump to the callee instead of paying a call/ret pair. This companion bit
+    // suppresses emission of the now-unreachable return instruction.
+    std::vector<bool> emitted_direct_tail_call(function.register_count, false);
     // A floating call result consumed exactly once by the immediately following
     // arithmetic instruction can stay in xmm0.  The arithmetic encoder consumes
     // it directly instead of storing the result to its allocation and loading it
@@ -1396,7 +1568,8 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     middle.opcode != machine::Opcode::load_immediate_f64)
                     break;
                 const auto& location = allocation.location(middle.result);
-                if (location.kind != machine::LocationKind::floating_register) break;
+                if (location.kind != machine::LocationKind::floating_register &&
+                    location.kind != machine::LocationKind::rematerialized_floating) break;
                 ++next_index;
             }
             if (next_index >= block.instructions.size()) continue;
@@ -1481,6 +1654,382 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             direct_call_float_next_call[reg] = false;
         if (direct_call_integer_next_call[reg] && result_use_counts[reg] != 1U)
             direct_call_integer_next_call[reg] = false;
+    }
+
+    // Strict ABI-XMM expression forwarding for call-free single-block leaves.
+    // This keeps incoming floating arguments in xmm0/xmm1/... through a
+    // single-use arithmetic chain that terminates directly in a floating
+    // return. It deliberately does not make ABI XMM registers part of the
+    // general allocator pool, avoiding cross-call and aggregate ABI hazards.
+    std::vector<std::int8_t> strict_float_xmm(function.register_count, -1);
+    if (function.blocks.size() == 1U) {
+        const auto& only_block = function.blocks.front();
+        bool has_call = false;
+        for (const auto& candidate : only_block.instructions) {
+            switch (candidate.opcode) {
+            case machine::Opcode::call_i32: case machine::Opcode::call_i64:
+            case machine::Opcode::call_f32: case machine::Opcode::call_f64:
+            case machine::Opcode::call_void: case machine::Opcode::call_aggregate:
+            case machine::Opcode::call_indirect_i32: case machine::Opcode::call_indirect_i64:
+            case machine::Opcode::call_indirect_f32: case machine::Opcode::call_indirect_f64:
+            case machine::Opcode::call_indirect_void:
+                has_call = true; break;
+            default: break;
+            }
+        }
+        const bool register_only_arguments = std::none_of(
+            argument_placements.begin(), argument_placements.end(),
+            [](const AbiPlacement& placement) { return placement.kind == AbiPlacement::Kind::stack; });
+        if (!has_call && register_only_arguments) {
+            std::vector<const machine::Instruction*> definitions(function.register_count, nullptr);
+            for (const auto& candidate : only_block.instructions) {
+                const bool floating_definition =
+                    candidate.opcode == machine::Opcode::load_argument_f32 || candidate.opcode == machine::Opcode::load_argument_f64 ||
+                    candidate.opcode == machine::Opcode::load_immediate_f32 || candidate.opcode == machine::Opcode::load_immediate_f64 ||
+                    candidate.opcode == machine::Opcode::add_f32 || candidate.opcode == machine::Opcode::sub_f32 ||
+                    candidate.opcode == machine::Opcode::mul_f32 || candidate.opcode == machine::Opcode::div_f32 ||
+                    candidate.opcode == machine::Opcode::add_f64 || candidate.opcode == machine::Opcode::sub_f64 ||
+                    candidate.opcode == machine::Opcode::mul_f64 || candidate.opcode == machine::Opcode::div_f64;
+                if (floating_definition && candidate.result < function.register_count)
+                    definitions[candidate.result] = &candidate;
+            }
+            std::vector<std::uint8_t> state(function.register_count, 0U);
+            std::function<int(machine::VirtualRegister)> forward_register = [&](machine::VirtualRegister reg) -> int {
+                if (reg >= function.register_count || result_use_counts[reg] != 1U) return -1;
+                if (state[reg] == 2U) return strict_float_xmm[reg];
+                if (state[reg] == 1U) return -1;
+                state[reg] = 1U;
+                const auto* definition = definitions[reg];
+                int selected = -1;
+                if (definition != nullptr) {
+                    if (definition->opcode == machine::Opcode::load_argument_f32 ||
+                        definition->opcode == machine::Opcode::load_argument_f64) {
+                        if (definition->argument_index < argument_placements.size()) {
+                            const auto placement = argument_placements[definition->argument_index];
+                            if (placement.kind == AbiPlacement::Kind::xmm && placement.index < 8U)
+                                selected = static_cast<int>(placement.index);
+                        }
+                    } else {
+                        const bool arithmetic =
+                            definition->opcode == machine::Opcode::add_f32 || definition->opcode == machine::Opcode::sub_f32 ||
+                            definition->opcode == machine::Opcode::mul_f32 || definition->opcode == machine::Opcode::div_f32 ||
+                            definition->opcode == machine::Opcode::add_f64 || definition->opcode == machine::Opcode::sub_f64 ||
+                            definition->opcode == machine::Opcode::mul_f64 || definition->opcode == machine::Opcode::div_f64;
+                        if (arithmetic && definition->symbol != "$memptr" && definition->inputs.size() == 2U) {
+                            const auto left = forward_register(definition->inputs[0]);
+                            const auto right = forward_register(definition->inputs[1]);
+                            const bool commutative = definition->opcode == machine::Opcode::add_f32 ||
+                                                     definition->opcode == machine::Opcode::mul_f32 ||
+                                                     definition->opcode == machine::Opcode::add_f64 ||
+                                                     definition->opcode == machine::Opcode::mul_f64;
+                            if (left >= 0) selected = left;
+                            else if (commutative && right >= 0) selected = right;
+                        }
+                    }
+                }
+                state[reg] = 2U;
+                strict_float_xmm[reg] = static_cast<std::int8_t>(selected);
+                return selected;
+            };
+            int root = -1;
+            for (const auto& candidate : only_block.instructions) {
+                if ((candidate.opcode == machine::Opcode::return_f32 || candidate.opcode == machine::Opcode::return_f64) &&
+                    candidate.inputs.size() == 1U) {
+                    root = forward_register(candidate.inputs[0]);
+                    break;
+                }
+            }
+            bool all_register_float_inputs_forwarded = root >= 0;
+            std::vector<machine::VirtualRegister> forwarded_entry_arguments;
+            if (all_register_float_inputs_forwarded) {
+                for (const auto& candidate : only_block.instructions) {
+                    if (candidate.opcode != machine::Opcode::load_argument_f32 &&
+                        candidate.opcode != machine::Opcode::load_argument_f64) continue;
+                    if (candidate.argument_index >= argument_placements.size() ||
+                        candidate.result >= strict_float_xmm.size()) {
+                        all_register_float_inputs_forwarded = false;
+                        break;
+                    }
+                    const auto placement = argument_placements[candidate.argument_index];
+                    if (placement.kind != AbiPlacement::Kind::xmm ||
+                        strict_float_xmm[candidate.result] != static_cast<std::int8_t>(placement.index)) {
+                        all_register_float_inputs_forwarded = false;
+                        break;
+                    }
+                    forwarded_entry_arguments.push_back(candidate.result);
+                }
+            }
+            // Keep this path to a single accumulator seed. With more independent
+            // incoming XMM values, scratch-register selection would need full
+            // live-ABI-register tracking rather than this deliberately narrow
+            // leaf fast path.
+            if (all_register_float_inputs_forwarded && forwarded_entry_arguments.size() > 2U)
+                all_register_float_inputs_forwarded = false;
+            if (all_register_float_inputs_forwarded && !forwarded_entry_arguments.empty()) {
+                const machine::Instruction* first_forwarded_arithmetic = nullptr;
+                for (const auto& candidate : only_block.instructions) {
+                    const bool arithmetic = candidate.opcode == machine::Opcode::add_f32 || candidate.opcode == machine::Opcode::sub_f32 ||
+                                            candidate.opcode == machine::Opcode::mul_f32 || candidate.opcode == machine::Opcode::div_f32 ||
+                                            candidate.opcode == machine::Opcode::add_f64 || candidate.opcode == machine::Opcode::sub_f64 ||
+                                            candidate.opcode == machine::Opcode::mul_f64 || candidate.opcode == machine::Opcode::div_f64;
+                    if (arithmetic && candidate.result < strict_float_xmm.size() && strict_float_xmm[candidate.result] >= 0) {
+                        first_forwarded_arithmetic = &candidate;
+                        break;
+                    }
+                }
+                if (first_forwarded_arithmetic == nullptr) all_register_float_inputs_forwarded = false;
+                else {
+                    for (const auto argument : forwarded_entry_arguments) {
+                        if (std::find(first_forwarded_arithmetic->inputs.begin(), first_forwarded_arithmetic->inputs.end(), argument) ==
+                            first_forwarded_arithmetic->inputs.end()) {
+                            all_register_float_inputs_forwarded = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!all_register_float_inputs_forwarded)
+                std::fill(strict_float_xmm.begin(), strict_float_xmm.end(), static_cast<std::int8_t>(-1));
+        }
+    }
+
+    // Strict ABI-GPR -> RAX expression forwarding for simple call-free leaves.
+    // This is intentionally much narrower than general register precoloring:
+    // every scalar integer argument must be register-passed, single-use, and
+    // consumed by one linear arithmetic chain that terminates directly in the
+    // matching integer return. With all entry copies suppressed together, no
+    // allocator destination can overwrite another still-live ABI source.
+    constexpr int strict_integer_rax = 0x100;
+    std::vector<int> strict_integer_source(function.register_count, -1);
+    if (function.blocks.size() == 1U && function.argument_count != 0U) {
+        const auto& only_block = function.blocks.front();
+        bool eligible = argument_placements.size() == function.argument_count &&
+                        std::all_of(argument_placements.begin(), argument_placements.end(),
+                            [](const AbiPlacement& placement) { return placement.kind == AbiPlacement::Kind::gpr; });
+        std::vector<machine::VirtualRegister> entry_regs;
+        entry_regs.reserve(function.argument_count);
+        std::optional<machine::VirtualRegister> chain;
+        bool saw_return = false;
+        for (const auto& candidate : only_block.instructions) {
+            if (!eligible) break;
+            if (candidate.opcode == machine::Opcode::load_argument ||
+                candidate.opcode == machine::Opcode::load_argument_i64) {
+                if (chain || candidate.argument_index >= argument_placements.size() ||
+                    candidate.result >= strict_integer_source.size()) { eligible = false; break; }
+                const auto placement = argument_placements[candidate.argument_index];
+                strict_integer_source[candidate.result] = static_cast<int>(args[placement.index]);
+                entry_regs.push_back(candidate.result);
+                continue;
+            }
+            const bool arithmetic =
+                candidate.opcode == machine::Opcode::add_i32 || candidate.opcode == machine::Opcode::sub_i32 ||
+                candidate.opcode == machine::Opcode::mul_i32 || candidate.opcode == machine::Opcode::and_i32 ||
+                candidate.opcode == machine::Opcode::or_i32  || candidate.opcode == machine::Opcode::xor_i32 ||
+                candidate.opcode == machine::Opcode::add_i64 || candidate.opcode == machine::Opcode::sub_i64 ||
+                candidate.opcode == machine::Opcode::mul_i64 || candidate.opcode == machine::Opcode::and_i64 ||
+                candidate.opcode == machine::Opcode::or_i64  || candidate.opcode == machine::Opcode::xor_i64;
+            if (arithmetic) {
+                if (candidate.result >= strict_integer_source.size() ||
+                    candidate.symbol == "$memptr" || candidate.symbol == "$memstack") { eligible = false; break; }
+                const bool immediate = candidate.symbol == "$imm";
+                if ((immediate && candidate.inputs.size() != 1U) || (!immediate && candidate.inputs.size() != 2U)) {
+                    eligible = false; break;
+                }
+                if (!chain) {
+                    for (const auto input : candidate.inputs) {
+                        if (input >= strict_integer_source.size() || strict_integer_source[input] < 0 ||
+                            strict_integer_source[input] == strict_integer_rax) { eligible = false; break; }
+                    }
+                    if (!eligible) break;
+                } else {
+                    unsigned chain_inputs = 0U;
+                    for (const auto input : candidate.inputs)
+                        if (input == *chain) ++chain_inputs;
+                    if (chain_inputs != 1U) { eligible = false; break; }
+                    const bool commutative = candidate.opcode == machine::Opcode::add_i32 ||
+                                             candidate.opcode == machine::Opcode::mul_i32 ||
+                                             candidate.opcode == machine::Opcode::and_i32 ||
+                                             candidate.opcode == machine::Opcode::or_i32  ||
+                                             candidate.opcode == machine::Opcode::xor_i32 ||
+                                             candidate.opcode == machine::Opcode::add_i64 ||
+                                             candidate.opcode == machine::Opcode::mul_i64 ||
+                                             candidate.opcode == machine::Opcode::and_i64 ||
+                                             candidate.opcode == machine::Opcode::or_i64  ||
+                                             candidate.opcode == machine::Opcode::xor_i64;
+                    if (!commutative && !candidate.inputs.empty() && candidate.inputs[0] != *chain) {
+                        eligible = false; break;
+                    }
+                    for (const auto input : candidate.inputs) {
+                        if (input == *chain) continue;
+                        if (input >= strict_integer_source.size() || strict_integer_source[input] < 0 ||
+                            strict_integer_source[input] == strict_integer_rax) { eligible = false; break; }
+                    }
+                    if (!eligible) break;
+                }
+                if (candidate.result >= result_use_counts.size() || result_use_counts[candidate.result] != 1U) {
+                    eligible = false; break;
+                }
+                strict_integer_source[candidate.result] = strict_integer_rax;
+                chain = candidate.result;
+                continue;
+            }
+            if (candidate.opcode == machine::Opcode::return_i32 || candidate.opcode == machine::Opcode::return_i64) {
+                if (!chain || candidate.inputs.size() != 1U || candidate.inputs[0] != *chain) {
+                    eligible = false; break;
+                }
+                saw_return = true;
+                continue;
+            }
+            eligible = false;
+            break;
+        }
+        if (eligible && saw_return && entry_regs.size() == function.argument_count) {
+            std::vector<bool> seen_argument(function.argument_count, false);
+            for (const auto& candidate : only_block.instructions) {
+                if (candidate.opcode != machine::Opcode::load_argument &&
+                    candidate.opcode != machine::Opcode::load_argument_i64) continue;
+                if (candidate.argument_index >= seen_argument.size() || seen_argument[candidate.argument_index] ||
+                    candidate.result >= result_use_counts.size() || result_use_counts[candidate.result] != 1U) {
+                    eligible = false; break;
+                }
+                seen_argument[candidate.argument_index] = true;
+            }
+            if (eligible && std::any_of(seen_argument.begin(), seen_argument.end(), [](bool seen) { return !seen; }))
+                eligible = false;
+        } else {
+            eligible = false;
+        }
+        if (!eligible)
+            std::fill(strict_integer_source.begin(), strict_integer_source.end(), -1);
+    }
+
+    // Direct compute -> pointer store -> return forwarding. For a tiny
+    // call-free leaf whose computed integer is both stored and immediately
+    // returned, keep that value in RAX and consume untouched ABI argument
+    // registers directly. This is a general store/return peephole, not tied to
+    // any symbol or constant value.
+    std::vector<bool> direct_store_return_rax(function.register_count, false);
+    std::vector<int> direct_store_entry_gpr(function.register_count, -1);
+    if (function.blocks.size() == 1U && function.argument_count == 2U &&
+        argument_placements.size() == 2U &&
+        std::all_of(argument_placements.begin(), argument_placements.end(),
+                    [](const AbiPlacement& placement) { return placement.kind == AbiPlacement::Kind::gpr; })) {
+        const auto& block = function.blocks.front();
+        std::vector<const machine::Instruction*> loads;
+        const machine::Instruction* arithmetic = nullptr;
+        const machine::Instruction* store = nullptr;
+        const machine::Instruction* ret = nullptr;
+        bool eligible = true;
+        for (const auto& candidate : block.instructions) {
+            if (candidate.opcode == machine::Opcode::load_argument_i64) loads.push_back(&candidate);
+            else if ((candidate.opcode == machine::Opcode::add_i64 || candidate.opcode == machine::Opcode::sub_i64 ||
+                      candidate.opcode == machine::Opcode::mul_i64 || candidate.opcode == machine::Opcode::and_i64 ||
+                      candidate.opcode == machine::Opcode::or_i64 || candidate.opcode == machine::Opcode::xor_i64) &&
+                     candidate.symbol == "$imm" && candidate.inputs.size() == 1U) {
+                if (arithmetic) { eligible = false; break; }
+                arithmetic = &candidate;
+            } else if (candidate.opcode == machine::Opcode::store_ptr_i64 && candidate.inputs.size() == 2U &&
+                       candidate.symbol != "$storeimm") {
+                if (store) { eligible = false; break; }
+                store = &candidate;
+            } else if (candidate.opcode == machine::Opcode::return_i64 && candidate.inputs.size() == 1U) {
+                if (ret) { eligible = false; break; }
+                ret = &candidate;
+            } else {
+                eligible = false; break;
+            }
+        }
+        if (eligible && loads.size() == 2U && arithmetic && store && ret &&
+            arithmetic->result < function.register_count &&
+            arithmetic->inputs[0] < function.register_count &&
+            store->inputs[0] == arithmetic->result && ret->inputs[0] == arithmetic->result &&
+            result_use_counts[arithmetic->result] == 2U &&
+            result_use_counts[arithmetic->inputs[0]] == 1U) {
+            const auto pointer = store->inputs[1];
+            if (pointer < function.register_count && result_use_counts[pointer] == 1U && pointer != arithmetic->inputs[0]) {
+                bool saw_value = false, saw_pointer = false;
+                for (const auto* load : loads) {
+                    if (load->argument_index >= argument_placements.size()) { eligible = false; break; }
+                    const auto source = static_cast<int>(args[argument_placements[load->argument_index].index]);
+                    if (load->result == arithmetic->inputs[0]) saw_value = true;
+                    else if (load->result == pointer) saw_pointer = true;
+                    else { eligible = false; break; }
+                    direct_store_entry_gpr[load->result] = source;
+                }
+                eligible = eligible && saw_value && saw_pointer;
+            } else eligible = false;
+        } else eligible = false;
+        if (eligible) direct_store_return_rax[arithmetic->result] = true;
+        else std::fill(direct_store_entry_gpr.begin(), direct_store_entry_gpr.end(), -1);
+    }
+
+    // First-call ABI forwarding. Keep the normal allocated entry copy (it
+    // may be needed after the call), but when an incoming ABI register is
+    // provably untouched up to the first call, let that first outgoing call
+    // consume the original register directly instead of copying the allocated
+    // value back into the same ABI register.
+    std::vector<int> first_call_entry_gpr(function.register_count, -1);
+    std::vector<int> first_call_entry_xmm(function.register_count, -1);
+    if (!function.blocks.empty()) {
+        const auto& entry = function.blocks.front();
+        bool before_first_call = true;
+        bool unsupported_prefix = false;
+        for (const auto& candidate : entry.instructions) {
+            const bool call = candidate.opcode == machine::Opcode::call_i32 || candidate.opcode == machine::Opcode::call_i64 ||
+                              candidate.opcode == machine::Opcode::call_f32 || candidate.opcode == machine::Opcode::call_f64 ||
+                              candidate.opcode == machine::Opcode::call_void || candidate.opcode == machine::Opcode::call_aggregate ||
+                              candidate.opcode == machine::Opcode::call_indirect_i32 || candidate.opcode == machine::Opcode::call_indirect_i64 ||
+                              candidate.opcode == machine::Opcode::call_indirect_f32 || candidate.opcode == machine::Opcode::call_indirect_f64 ||
+                              candidate.opcode == machine::Opcode::call_indirect_void;
+            if (call) { before_first_call = false; break; }
+            if (!before_first_call) break;
+            if ((candidate.opcode == machine::Opcode::load_argument || candidate.opcode == machine::Opcode::load_argument_i64 ||
+                 candidate.opcode == machine::Opcode::load_argument_f32 || candidate.opcode == machine::Opcode::load_argument_f64) &&
+                candidate.argument_index < argument_placements.size() && candidate.result < function.register_count) {
+                const auto placement = argument_placements[candidate.argument_index];
+                if (placement.kind == AbiPlacement::Kind::gpr)
+                    first_call_entry_gpr[candidate.result] = static_cast<int>(args[placement.index]);
+                else if (placement.kind == AbiPlacement::Kind::xmm)
+                    first_call_entry_xmm[candidate.result] = static_cast<int>(placement.index);
+                continue;
+            }
+            const bool rematerialized_constant =
+                (candidate.opcode == machine::Opcode::load_immediate || candidate.opcode == machine::Opcode::load_immediate_i64) &&
+                candidate.result < function.register_count &&
+                allocation.location(candidate.result).kind == machine::LocationKind::rematerialized_integer;
+            const bool rematerialized_float =
+                (candidate.opcode == machine::Opcode::load_immediate_f32 || candidate.opcode == machine::Opcode::load_immediate_f64) &&
+                candidate.result < function.register_count &&
+                allocation.location(candidate.result).kind == machine::LocationKind::rematerialized_floating;
+            if (!rematerialized_constant && !rematerialized_float) {
+                unsupported_prefix = true;
+                break;
+            }
+        }
+        if (unsupported_prefix || before_first_call) {
+            std::fill(first_call_entry_gpr.begin(), first_call_entry_gpr.end(), -1);
+            std::fill(first_call_entry_xmm.begin(), first_call_entry_xmm.end(), -1);
+        } else {
+            // Entry parallel copies happen before the first call. If any other
+            // argument is allocated into a candidate's incoming register, that
+            // source is not untouched and must use the normal copy path.
+            for (const auto& load : entry.instructions) {
+                if (load.opcode != machine::Opcode::load_argument && load.opcode != machine::Opcode::load_argument_i64 &&
+                    load.opcode != machine::Opcode::load_argument_f32 && load.opcode != machine::Opcode::load_argument_f64)
+                    continue;
+                if (load.result >= function.register_count) continue;
+                const auto destination = allocation.location(load.result);
+                for (machine::VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+                    if (reg == load.result) continue;
+                    if (first_call_entry_gpr[reg] >= 0 && destination.kind == machine::LocationKind::physical_register &&
+                        static_cast<int>(physical_register(destination.physical)) == first_call_entry_gpr[reg])
+                        first_call_entry_gpr[reg] = -1;
+                    if (first_call_entry_xmm[reg] >= 0 && destination.kind == machine::LocationKind::floating_register &&
+                        static_cast<int>(floating_register(destination.floating)) == first_call_entry_xmm[reg])
+                        first_call_entry_xmm[reg] = -1;
+                }
+            }
+        }
     }
 
     std::optional<machine::AllocationLocation> current_result_location;
@@ -1618,6 +2167,16 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
     };
     const auto read_floating_cached = [&](XmmRegister destination,
                                           const machine::AllocationLocation& location, bool wide) {
+        if (location.kind == machine::LocationKind::rematerialized_floating) {
+            if (location.rematerialized_immediate == 0) {
+                emit_sse_xor(out, destination, destination, wide);
+            } else {
+                emit_sse_rip_load_placeholder(out, destination, wide);
+                floating_literal_fixups.push_back({out.size() - 4U,
+                    static_cast<std::uint64_t>(location.rematerialized_immediate), wide});
+            }
+            return;
+        }
         if (location.kind != machine::LocationKind::stack_slot) {
             emit_read_float_location(out, destination, location, wide);
             return;
@@ -1730,8 +2289,10 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
         std::uint32_t area{};
         std::optional<std::int32_t> preserved_pointer_offset;
     };
+    std::uint32_t prepared_call_count = 0U;
     const auto prepare_call_arguments = [&](std::span<const machine::VirtualRegister> call_arguments,
                                             std::optional<machine::VirtualRegister> preserved_pointer = std::nullopt) -> PreparedCall {
+        const bool first_prepared_call = prepared_call_count++ == 0U;
         std::vector<machine::RegisterClass> classes;
         classes.reserve(call_arguments.size());
         bool has_integer = false;
@@ -1756,14 +2317,13 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
         const auto preserved_pointer_offset = preserved_pointer
             ? std::optional<std::uint32_t>(stack_base + stack_count * 8U) : std::nullopt;
         const auto raw_call_area = stack_base + stack_count * 8U + (preserved_pointer ? 8U : 0U);
-        // Include the return address and, when present, the saved frame
-        // pointer. Callee-saved pushes are already reflected explicitly.
+        // The outgoing area is reserved once in the function prologue. Keep
+        // reporting the ABI padding this individual call would require, but do
+        // not modify rsp here.
         const auto fixed_depth = static_cast<std::uint32_t>(
             callee_saved.size() * 8U + (omit_frame_pointer ? 8U : 16U));
         const auto alignment_pad = (16U - ((fixed_depth + raw_call_area) & 15U)) & 15U;
         encoded.abi_alignment_padding_byte_count += alignment_pad;
-        const auto call_area = raw_call_area + alignment_pad;
-        emit_adjust_rsp(out, true, call_area);
 
         if (preserved_pointer && preserved_pointer_offset) {
             emit_read_location64(out, Register::eax, allocation.location(*preserved_pointer));
@@ -1807,6 +2367,8 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             const auto destination = static_cast<XmmRegister>(placement.index);
             const auto& source_location = allocation.location(source);
             if ((direct_call_float_next_call[source] && destination == XmmRegister::xmm0) ||
+                (first_prepared_call && source < first_call_entry_xmm.size() && first_call_entry_xmm[source] >= 0 &&
+                 static_cast<int>(destination) == first_call_entry_xmm[source]) ||
                 (source_location.kind == machine::LocationKind::floating_register &&
                  floating_register(source_location.floating) == destination))
                 continue;
@@ -1820,10 +2382,22 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                    floating_register(location.floating) == reg;
         };
         const auto emit_xmm_copy = [&](PendingXmmCopy& copy) {
-            if (direct_call_float_next_call[copy.source])
+            if (direct_call_float_next_call[copy.source]) {
                 emit_sse_move(out, copy.destination, XmmRegister::xmm0, copy.wide);
-            else
-                emit_read_float_location(out, copy.destination, allocation.location(copy.source), copy.wide);
+                return;
+            }
+            const auto& location = allocation.location(copy.source);
+            if (location.kind == machine::LocationKind::rematerialized_floating) {
+                if (location.rematerialized_immediate == 0) {
+                    emit_sse_xor(out, copy.destination, copy.destination, copy.wide);
+                } else {
+                    emit_sse_rip_load_placeholder(out, copy.destination, copy.wide);
+                    floating_literal_fixups.push_back({out.size() - 4U,
+                        static_cast<std::uint64_t>(location.rematerialized_immediate), copy.wide});
+                }
+            } else {
+                emit_read_float_location(out, copy.destination, location, copy.wide);
+            }
         };
 
         emit_acyclic_parallel_copies(
@@ -1907,6 +2481,8 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             const auto destination = args[placement.index];
             const auto& source_location = allocation.location(source);
             if ((direct_call_integer_next_call[source] && destination == Register::eax) ||
+                (first_prepared_call && source < first_call_entry_gpr.size() && first_call_entry_gpr[source] >= 0 &&
+                 static_cast<int>(destination) == first_call_entry_gpr[source]) ||
                 (source_location.kind == machine::LocationKind::physical_register &&
                  physical_register(source_location.physical) == destination))
                 continue;
@@ -2013,7 +2589,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             emit_adjust_rsp(out, false, scratch_size);
         }
 
-        return {call_area, preserved_pointer_offset
+        return {0U, preserved_pointer_offset
             ? std::optional<std::int32_t>(static_cast<std::int32_t>(*preserved_pointer_offset))
             : std::nullopt};
     };
@@ -2027,12 +2603,24 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
     if (capture_r8) emit_store_stack64(out, Register::r8d, r8_capture_offset);
     if (capture_r9) emit_store_stack64(out, Register::r9d, r9_capture_offset);
     for (const auto reg : callee_saved) emit_push_physical(out, reg);
+    const bool compact_alignment_slot = maximum_raw_call_area == 0U && reserved_call_area == 8U;
+    if (compact_alignment_slot) out.byte(0x50); // push rax: compact 8-byte alignment reservation
+    else emit_adjust_rsp(out, true, reserved_call_area);
 
-    const auto emit_epilogue = [&] {
+    const auto emit_frame_restore = [&] {
+        if (compact_alignment_slot) {
+            // Discard the alignment slot without clobbering a live return value.
+            out.byte(0x41); out.byte(0x5B); // pop r11
+        } else {
+            emit_adjust_rsp(out, false, reserved_call_area);
+        }
         for (auto iterator = callee_saved.rbegin(); iterator != callee_saved.rend(); ++iterator)
             emit_pop_physical(out, *iterator);
         if (!omit_frame_pointer) out.byte(0xC9); // leave
         else ++encoded.leaf_frame_byte_avoided_count;
+    };
+    const auto emit_epilogue = [&] {
+        emit_frame_restore();
         out.byte(0xC3); // ret
     };
 
@@ -2074,6 +2662,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                 struct FloatingEntryCopy {
                     std::optional<XmmRegister> source_register;
                     std::optional<std::int32_t> source_stack_offset;
+                    bool source_rsp{};
                     machine::AllocationLocation destination;
                     bool wide{};
                     bool emitted{};
@@ -2093,26 +2682,45 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     if (placement.kind == AbiPlacement::Kind::xmm) {
                         copy.source_register = static_cast<XmmRegister>(placement.index);
                     } else if (placement.kind == AbiPlacement::Kind::stack) {
-                        const auto base = abi == Abi::windows ? 48U : 16U;
-                        copy.source_stack_offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
+                        if (omit_frame_pointer) {
+                            const auto entry_base = abi == Abi::windows ? 40U : 8U;
+                            const auto prologue_depth = static_cast<std::uint32_t>(callee_saved.size() * 8U) + reserved_call_area;
+                            copy.source_stack_offset = static_cast<std::int32_t>(entry_base + prologue_depth + placement.stack_index * 8U);
+                            copy.source_rsp = true;
+                        } else {
+                            const auto base = abi == Abi::windows ? 48U : 16U;
+                            copy.source_stack_offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
+                        }
                     } else {
                         add_error(diagnostics, "floating argument ABI class mismatch in @" + function.name);
                         return encoded;
                     }
-                    if (copy.source_register && copy.destination.kind == machine::LocationKind::floating_register &&
-                        floating_register(copy.destination.floating) == *copy.source_register)
+                    if (copy.source_register && load.result < strict_float_xmm.size() &&
+                        strict_float_xmm[load.result] >= 0 &&
+                        static_cast<XmmRegister>(strict_float_xmm[load.result]) == *copy.source_register) {
                         copy.emitted = true;
+                    } else if (copy.source_register && copy.destination.kind == machine::LocationKind::floating_register &&
+                               floating_register(copy.destination.floating) == *copy.source_register) {
+                        copy.emitted = true;
+                    }
                     copies.push_back(copy);
                 }
 
-                const auto emit_floating_entry_copy = [&](FloatingEntryCopy& copy) {
+                const auto emit_floating_entry_copy = [&](FloatingEntryCopy& copy, std::int32_t rsp_adjust = 0) {
                     if (copy.source_register) {
                         emit_write_float_location(out, copy.destination, *copy.source_register, copy.wide);
                     } else if (copy.destination.kind == machine::LocationKind::floating_register) {
-                        emit_sse_stack_load(out, floating_register(copy.destination.floating),
-                                            *copy.source_stack_offset, copy.wide);
+                        if (copy.source_rsp)
+                            emit_sse_rsp_load(out, floating_register(copy.destination.floating),
+                                              *copy.source_stack_offset + rsp_adjust, copy.wide);
+                        else
+                            emit_sse_stack_load(out, floating_register(copy.destination.floating),
+                                                *copy.source_stack_offset, copy.wide);
                     } else {
-                        emit_sse_stack_load(out, XmmRegister::xmm0, *copy.source_stack_offset, copy.wide);
+                        if (copy.source_rsp)
+                            emit_sse_rsp_load(out, XmmRegister::xmm0, *copy.source_stack_offset + rsp_adjust, copy.wide);
+                        else
+                            emit_sse_stack_load(out, XmmRegister::xmm0, *copy.source_stack_offset, copy.wide);
                         emit_write_float_location(out, copy.destination, XmmRegister::xmm0, copy.wide);
                     }
                     copy.emitted = true;
@@ -2164,9 +2772,14 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                             emit_sse_rsp_store(out, *cycle[index]->source_register,
                                                static_cast<std::int32_t>(index * 8U), cycle[index]->wide);
                         else {
-                            emit_sse_stack_load(out, XmmRegister::xmm0,
-                                                *cycle[index]->source_stack_offset + static_cast<std::int32_t>(scratch_size),
-                                                cycle[index]->wide);
+                            if (cycle[index]->source_rsp)
+                                emit_sse_rsp_load(out, XmmRegister::xmm0,
+                                                  *cycle[index]->source_stack_offset + static_cast<std::int32_t>(scratch_size),
+                                                  cycle[index]->wide);
+                            else
+                                emit_sse_stack_load(out, XmmRegister::xmm0,
+                                                    *cycle[index]->source_stack_offset,
+                                                    cycle[index]->wide);
                             emit_sse_rsp_store(out, XmmRegister::xmm0,
                                                static_cast<std::int32_t>(index * 8U), cycle[index]->wide);
                         }
@@ -2205,6 +2818,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                 struct EntryCopy {
                     std::optional<Register> source_register;
                     std::optional<std::int32_t> source_stack_offset;
+                    bool source_rsp{};
                     machine::AllocationLocation destination;
                     bool wide{};
                     bool emitted{};
@@ -2232,28 +2846,50 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                         else
                             copy.source_register = source;
                     } else if (placement.kind == AbiPlacement::Kind::stack) {
-                        const auto base = abi == Abi::windows ? 48U : 16U;
-                        copy.source_stack_offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
+                        if (omit_frame_pointer) {
+                            const auto entry_base = abi == Abi::windows ? 40U : 8U;
+                            const auto prologue_depth = static_cast<std::uint32_t>(callee_saved.size() * 8U) + reserved_call_area;
+                            copy.source_stack_offset = static_cast<std::int32_t>(entry_base + prologue_depth + placement.stack_index * 8U);
+                            copy.source_rsp = true;
+                        } else {
+                            const auto base = abi == Abi::windows ? 48U : 16U;
+                            copy.source_stack_offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
+                        }
                     } else {
                         add_error(diagnostics, "integer argument ABI class mismatch in @" + function.name);
                         valid_run = false;
                         break;
                     }
-                    if (copy.source_register && copy.destination.kind == machine::LocationKind::physical_register &&
-                        physical_register(copy.destination.physical) == *copy.source_register) {
+                    if (copy.source_register && load.result < strict_integer_source.size() &&
+                        strict_integer_source[load.result] >= 0 &&
+                        strict_integer_source[load.result] != strict_integer_rax &&
+                        static_cast<Register>(strict_integer_source[load.result]) == *copy.source_register) {
+                        copy.emitted = true;
+                    } else if (copy.source_register && load.result < direct_store_entry_gpr.size() &&
+                               direct_store_entry_gpr[load.result] >= 0 &&
+                               static_cast<Register>(direct_store_entry_gpr[load.result]) == *copy.source_register) {
+                        copy.emitted = true;
+                    } else if (copy.source_register && copy.destination.kind == machine::LocationKind::physical_register &&
+                               physical_register(copy.destination.physical) == *copy.source_register) {
                         copy.emitted = true;
                     }
                     copies.push_back(copy);
                 }
                 if (!valid_run) return encoded;
 
-                const auto emit_entry_copy = [&](EntryCopy& copy, Register scratch = Register::eax) {
+                const auto emit_entry_copy = [&](EntryCopy& copy, Register scratch = Register::eax,
+                                                   std::int32_t rsp_adjust = 0) {
                     if (copy.source_register) {
                         if (copy.wide) emit_write_location64(out, copy.destination, *copy.source_register);
                         else emit_write_location(out, copy.destination, *copy.source_register);
                     } else {
-                        if (copy.wide) emit_load_stack64(out, scratch, *copy.source_stack_offset);
-                        else emit_load_stack(out, scratch, *copy.source_stack_offset);
+                        if (copy.source_rsp) {
+                            if (copy.wide) emit_load_rsp64(out, scratch, *copy.source_stack_offset + rsp_adjust);
+                            else emit_load_rsp(out, scratch, *copy.source_stack_offset + rsp_adjust);
+                        } else {
+                            if (copy.wide) emit_load_stack64(out, scratch, *copy.source_stack_offset);
+                            else emit_load_stack(out, scratch, *copy.source_stack_offset);
+                        }
                         if (copy.wide) emit_write_location64(out, copy.destination, scratch);
                         else emit_write_location(out, copy.destination, scratch);
                     }
@@ -2341,7 +2977,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     emit_adjust_rsp(out, true, scratch_size);
                     for (std::size_t index = 0; index < cyclic.size(); ++index) {
                         if (!cyclic[index]->source_register) {
-                            emit_entry_copy(*cyclic[index]);
+                            emit_entry_copy(*cyclic[index], Register::eax, static_cast<std::int32_t>(scratch_size));
                             continue;
                         }
                         const auto source = *cyclic[index]->source_register;
@@ -2465,17 +3101,33 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     } else if (wide) write_integer_cached64(allocation.location(instruction.result), source);
                     else write_integer_cached32(allocation.location(instruction.result), source);
                 } else if (placement.kind == AbiPlacement::Kind::stack) {
-                    const auto base = abi == Abi::windows ? 48U : 16U;
-                    const auto offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
-                    if (floating) {
-                        emit_sse_stack_load(out, XmmRegister::xmm0, offset, wide);
-                        write_floating_cached(allocation.location(instruction.result), XmmRegister::xmm0, wide);
-                    } else if (wide) {
-                        emit_load_stack64(out, Register::eax, offset);
-                        write_integer_cached64(allocation.location(instruction.result), Register::eax);
+                    if (omit_frame_pointer) {
+                        const auto entry_base = abi == Abi::windows ? 40U : 8U;
+                        const auto prologue_depth = static_cast<std::uint32_t>(callee_saved.size() * 8U) + reserved_call_area;
+                        const auto offset = static_cast<std::int32_t>(entry_base + prologue_depth + placement.stack_index * 8U);
+                        if (floating) {
+                            emit_sse_rsp_load(out, XmmRegister::xmm0, offset, wide);
+                            write_floating_cached(allocation.location(instruction.result), XmmRegister::xmm0, wide);
+                        } else if (wide) {
+                            emit_load_rsp64(out, Register::eax, offset);
+                            write_integer_cached64(allocation.location(instruction.result), Register::eax);
+                        } else {
+                            emit_load_rsp(out, Register::eax, offset);
+                            write_integer_cached32(allocation.location(instruction.result), Register::eax);
+                        }
                     } else {
-                        emit_load_stack(out, Register::eax, offset);
-                        write_integer_cached32(allocation.location(instruction.result), Register::eax);
+                        const auto base = abi == Abi::windows ? 48U : 16U;
+                        const auto offset = static_cast<std::int32_t>(base + placement.stack_index * 8U);
+                        if (floating) {
+                            emit_sse_stack_load(out, XmmRegister::xmm0, offset, wide);
+                            write_floating_cached(allocation.location(instruction.result), XmmRegister::xmm0, wide);
+                        } else if (wide) {
+                            emit_load_stack64(out, Register::eax, offset);
+                            write_integer_cached64(allocation.location(instruction.result), Register::eax);
+                        } else {
+                            emit_load_stack(out, Register::eax, offset);
+                            write_integer_cached32(allocation.location(instruction.result), Register::eax);
+                        }
                     }
                 } else {
                     add_error(diagnostics, "argument ABI class mismatch in @" + function.name);
@@ -2492,8 +3144,9 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     emit_sse_xor(out, target, target, false);
                     ++encoded.floating_zeroing_idiom_count;
                 } else {
-                    emit_mov_imm32(out, Register::eax, static_cast<std::int32_t>(instruction.immediate));
-                    emit_mov_gpr_to_xmm(out, target, Register::eax, false);
+                    emit_sse_rip_load_placeholder(out, target, false);
+                    floating_literal_fixups.push_back({out.size() - 4U,
+                        static_cast<std::uint32_t>(instruction.immediate), false});
                 }
                 if (destination.kind != machine::LocationKind::floating_register)
                     write_floating_cached(destination, target, false);
@@ -2508,8 +3161,9 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     emit_sse_xor(out, target, target, true);
                     ++encoded.floating_zeroing_idiom_count;
                 } else {
-                    emit_mov_imm64(out, Register::eax, instruction.immediate);
-                    emit_mov_gpr_to_xmm(out, target, Register::eax, true);
+                    emit_sse_rip_load_placeholder(out, target, true);
+                    floating_literal_fixups.push_back({out.size() - 4U,
+                        static_cast<std::uint64_t>(instruction.immediate), true});
                 }
                 if (destination.kind != machine::LocationKind::floating_register)
                     write_floating_cached(destination, target, true);
@@ -2576,8 +3230,13 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             case machine::Opcode::load_ptr_f64: {
                 const bool wide = instruction.opcode == machine::Opcode::load_ptr_f64;
                 if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed floating pointer load in @" + function.name); return encoded; }
-                emit_read_location64(out, Register::ecx, allocation.location(instruction.inputs[0]));
-                emit_sse_ptr_load(out, XmmRegister::xmm0, Register::ecx, wide, static_cast<std::int32_t>(instruction.immediate));
+                const auto& pointer_location = allocation.location(instruction.inputs[0]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    emit_read_location64(out, pointer, pointer_location);
+                emit_sse_ptr_load(out, XmmRegister::xmm0, pointer, wide, static_cast<std::int32_t>(instruction.immediate));
                 write_floating_cached(allocation.location(instruction.result), XmmRegister::xmm0, wide);
                 break;
             }
@@ -2586,58 +3245,114 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                 const bool wide = instruction.opcode == machine::Opcode::store_ptr_f64;
                 if (instruction.inputs.size() != 2) { add_error(diagnostics, "malformed floating pointer store in @" + function.name); return encoded; }
                 emit_read_float_location(out, XmmRegister::xmm0, allocation.location(instruction.inputs[0]), wide);
-                read_integer_cached(Register::ecx, allocation.location(instruction.inputs[1]), true);
-                emit_sse_ptr_store(out, Register::ecx, XmmRegister::xmm0, wide, static_cast<std::int32_t>(instruction.immediate));
+                const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    read_integer_cached(pointer, pointer_location, true);
+                emit_sse_ptr_store(out, pointer, XmmRegister::xmm0, wide, static_cast<std::int32_t>(instruction.immediate));
                 break;
             }
             case machine::Opcode::load_ptr_i8:
             case machine::Opcode::load_ptr_i16:
-            case machine::Opcode::load_ptr_i32:
+            case machine::Opcode::load_ptr_i32: {
                 if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed pointer load in @" + function.name); return encoded; }
-                emit_read_location64(out, Register::ecx, allocation.location(instruction.inputs[0]));
-                if (instruction.opcode == machine::Opcode::load_ptr_i8) emit_load_ptr_i8(out, Register::eax, Register::ecx, static_cast<std::int32_t>(instruction.immediate));
-                else if (instruction.opcode == machine::Opcode::load_ptr_i16) emit_load_ptr_i16(out, Register::eax, Register::ecx, static_cast<std::int32_t>(instruction.immediate));
-                else emit_load_ptr_i32(out, Register::eax, Register::ecx, static_cast<std::int32_t>(instruction.immediate));
+                const auto& pointer_location = allocation.location(instruction.inputs[0]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    emit_read_location64(out, pointer, pointer_location);
+                if (instruction.opcode == machine::Opcode::load_ptr_i8) emit_load_ptr_i8(out, Register::eax, pointer, static_cast<std::int32_t>(instruction.immediate));
+                else if (instruction.opcode == machine::Opcode::load_ptr_i16) emit_load_ptr_i16(out, Register::eax, pointer, static_cast<std::int32_t>(instruction.immediate));
+                else emit_load_ptr_i32(out, Register::eax, pointer, static_cast<std::int32_t>(instruction.immediate));
                 write_integer_cached32(allocation.location(instruction.result), Register::eax);
                 break;
-            case machine::Opcode::load_ptr_i64:
+            }
+            case machine::Opcode::load_ptr_i64: {
                 if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed i64 pointer load in @" + function.name); return encoded; }
-                emit_read_location64(out, Register::ecx, allocation.location(instruction.inputs[0]));
-                emit_load_ptr_i64(out, Register::eax, Register::ecx, static_cast<std::int32_t>(instruction.immediate));
-                write_integer_cached64(allocation.location(instruction.result), Register::eax);
+                const auto& pointer_location = allocation.location(instruction.inputs[0]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    emit_read_location64(out, pointer, pointer_location);
+                const auto& destination = allocation.location(instruction.result);
+                if (destination.kind == machine::LocationKind::physical_register) {
+                    emit_load_ptr_i64(out, integer_register(destination.physical), pointer,
+                                      static_cast<std::int32_t>(instruction.immediate));
+                } else {
+                    emit_load_ptr_i64(out, Register::eax, pointer, static_cast<std::int32_t>(instruction.immediate));
+                    write_integer_cached64(destination, Register::eax);
+                }
                 break;
-            case machine::Opcode::store_ptr_i64:
+            }
+            case machine::Opcode::store_ptr_i64: {
                 if (instruction.symbol == "$storeimm") {
                     if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed immediate i64 pointer store in @" + function.name); return encoded; }
-                    read_integer_cached(Register::ecx, allocation.location(instruction.inputs[0]), true);
-                    emit_store_ptr_immediate(out, Register::ecx, instruction.argument_index,
+                    const auto& pointer_location = allocation.location(instruction.inputs[0]);
+                    Register pointer = Register::ecx;
+                    if (pointer_location.kind == machine::LocationKind::physical_register)
+                        pointer = integer_register(pointer_location.physical);
+                    else
+                        read_integer_cached(pointer, pointer_location, true);
+                    emit_store_ptr_immediate(out, pointer, instruction.argument_index,
                                              static_cast<std::int32_t>(instruction.immediate), 8U);
                     break;
                 }
                 if (instruction.inputs.size() != 2) { add_error(diagnostics, "malformed i64 pointer store in @" + function.name); return encoded; }
-                emit_read_location64(out, Register::eax, allocation.location(instruction.inputs[0]));
-                read_integer_cached(Register::ecx, allocation.location(instruction.inputs[1]), true);
-                emit_store_ptr_i64(out, Register::ecx, Register::eax, static_cast<std::int32_t>(instruction.immediate));
+                if (instruction.inputs[0] < direct_store_return_rax.size() && direct_store_return_rax[instruction.inputs[0]] &&
+                    instruction.inputs[1] < direct_store_entry_gpr.size() && direct_store_entry_gpr[instruction.inputs[1]] >= 0) {
+                    emit_store_ptr_i64(out, static_cast<Register>(direct_store_entry_gpr[instruction.inputs[1]]),
+                                       Register::eax, static_cast<std::int32_t>(instruction.immediate));
+                    break;
+                }
+                const auto& value_location = allocation.location(instruction.inputs[0]);
+                const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    read_integer_cached(pointer, pointer_location, true);
+                Register value = Register::eax;
+                if (value_location.kind == machine::LocationKind::physical_register)
+                    value = integer_register(value_location.physical);
+                else
+                    emit_read_location64(out, value, value_location);
+                emit_store_ptr_i64(out, pointer, value, static_cast<std::int32_t>(instruction.immediate));
                 break;
+            }
             case machine::Opcode::store_ptr_i8:
             case machine::Opcode::store_ptr_i16:
-            case machine::Opcode::store_ptr_i32:
+            case machine::Opcode::store_ptr_i32: {
                 if (instruction.symbol == "$storeimm") {
                     if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed immediate pointer store in @" + function.name); return encoded; }
-                    read_integer_cached(Register::ecx, allocation.location(instruction.inputs[0]), true);
+                    const auto& pointer_location = allocation.location(instruction.inputs[0]);
+                    Register pointer = Register::ecx;
+                    if (pointer_location.kind == machine::LocationKind::physical_register)
+                        pointer = integer_register(pointer_location.physical);
+                    else
+                        read_integer_cached(pointer, pointer_location, true);
                     const auto width = instruction.opcode == machine::Opcode::store_ptr_i8 ? 1U :
                                        instruction.opcode == machine::Opcode::store_ptr_i16 ? 2U : 4U;
-                    emit_store_ptr_immediate(out, Register::ecx, instruction.argument_index,
+                    emit_store_ptr_immediate(out, pointer, instruction.argument_index,
                                              static_cast<std::int32_t>(instruction.immediate), width);
                     break;
                 }
                 if (instruction.inputs.size() != 2) { add_error(diagnostics, "malformed pointer store in @" + function.name); return encoded; }
                 emit_read_location(out, Register::eax, allocation.location(instruction.inputs[0]));
-                read_integer_cached(Register::ecx, allocation.location(instruction.inputs[1]), true);
-                if (instruction.opcode == machine::Opcode::store_ptr_i8) emit_store_ptr_i8(out, Register::ecx, Register::eax, static_cast<std::int32_t>(instruction.immediate));
-                else if (instruction.opcode == machine::Opcode::store_ptr_i16) emit_store_ptr_i16(out, Register::ecx, Register::eax, static_cast<std::int32_t>(instruction.immediate));
-                else emit_store_ptr_i32(out, Register::ecx, Register::eax, static_cast<std::int32_t>(instruction.immediate));
+                const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                Register pointer = Register::ecx;
+                if (pointer_location.kind == machine::LocationKind::physical_register)
+                    pointer = integer_register(pointer_location.physical);
+                else
+                    read_integer_cached(pointer, pointer_location, true);
+                if (instruction.opcode == machine::Opcode::store_ptr_i8) emit_store_ptr_i8(out, pointer, Register::eax, static_cast<std::int32_t>(instruction.immediate));
+                else if (instruction.opcode == machine::Opcode::store_ptr_i16) emit_store_ptr_i16(out, pointer, Register::eax, static_cast<std::int32_t>(instruction.immediate));
+                else emit_store_ptr_i32(out, pointer, Register::eax, static_cast<std::int32_t>(instruction.immediate));
                 break;
+            }
             case machine::Opcode::load_stack_f32:
             case machine::Opcode::load_stack_f64: {
                 const bool wide = instruction.opcode == machine::Opcode::load_stack_f64;
@@ -2681,6 +3396,54 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                                          instruction.opcode == machine::Opcode::add_f64 ||
                                          instruction.opcode == machine::Opcode::mul_f32 ||
                                          instruction.opcode == machine::Opcode::mul_f64;
+                const int forwarded_result = instruction.result < strict_float_xmm.size() ? strict_float_xmm[instruction.result] : -1;
+                if (forwarded_result >= 0 && instruction.symbol != "$memptr") {
+                    const int forwarded_left = instruction.inputs[0] < strict_float_xmm.size() ? strict_float_xmm[instruction.inputs[0]] : -1;
+                    const int forwarded_right = instruction.inputs[1] < strict_float_xmm.size() ? strict_float_xmm[instruction.inputs[1]] : -1;
+                    const auto target = static_cast<XmmRegister>(forwarded_result);
+                    XmmRegister source = XmmRegister::xmm1;
+                    if (forwarded_left == forwarded_result) {
+                        if (forwarded_right >= 0) source = static_cast<XmmRegister>(forwarded_right);
+                        else {
+                            source = target == XmmRegister::xmm1 ? XmmRegister::xmm2 : XmmRegister::xmm1;
+                            read_floating_cached(source, right, wide);
+                        }
+                    } else if (commutative && forwarded_right == forwarded_result) {
+                        if (forwarded_left >= 0) source = static_cast<XmmRegister>(forwarded_left);
+                        else {
+                            source = target == XmmRegister::xmm1 ? XmmRegister::xmm2 : XmmRegister::xmm1;
+                            read_floating_cached(source, left, wide);
+                        }
+                    } else {
+                        add_error(diagnostics, "invalid strict floating forwarding state in @" + function.name);
+                        return encoded;
+                    }
+                    emit_sse_binary(out, target, source, wide, op);
+                    break;
+                }
+                if (instruction.symbol == "$memptr") {
+                    if (instruction.inputs.size() != 2U) {
+                        add_error(diagnostics, "malformed floating memory arithmetic in @" + function.name);
+                        return encoded;
+                    }
+                    const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                    Register pointer = Register::ecx;
+                    if (pointer_location.kind == machine::LocationKind::physical_register)
+                        pointer = integer_register(pointer_location.physical);
+                    else
+                        emit_read_location64(out, pointer, pointer_location);
+                    if (destination.kind == machine::LocationKind::floating_register && same_location(destination, left)) {
+                        emit_sse_binary_ptr(out, floating_register(destination.floating), pointer, wide, op,
+                                            static_cast<std::int32_t>(instruction.immediate));
+                        ++encoded.two_address_reuse_count;
+                    } else {
+                        read_floating_cached(XmmRegister::xmm0, left, wide);
+                        emit_sse_binary_ptr(out, XmmRegister::xmm0, pointer, wide, op,
+                                            static_cast<std::int32_t>(instruction.immediate));
+                        write_floating_cached(destination, XmmRegister::xmm0, wide);
+                    }
+                    break;
+                }
                 const bool forwarded_left = instruction.inputs[0] < direct_call_float_arithmetic.size() &&
                                             direct_call_float_arithmetic[instruction.inputs[0]];
                 const bool forwarded_right = commutative &&
@@ -2887,6 +3650,105 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             case machine::Opcode::and_i64:
             case machine::Opcode::or_i64:
             case machine::Opcode::xor_i64: {
+                if (instruction.result < direct_store_return_rax.size() && direct_store_return_rax[instruction.result]) {
+                    if (instruction.symbol != "$imm" || instruction.inputs.size() != 1U ||
+                        instruction.immediate < std::numeric_limits<std::int32_t>::min() ||
+                        instruction.immediate > std::numeric_limits<std::int32_t>::max() ||
+                        instruction.inputs[0] >= direct_store_entry_gpr.size() ||
+                        direct_store_entry_gpr[instruction.inputs[0]] < 0) {
+                        add_error(diagnostics, "malformed direct store-return arithmetic in @" + function.name); return encoded;
+                    }
+                    const auto source = static_cast<Register>(direct_store_entry_gpr[instruction.inputs[0]]);
+                    if (instruction.opcode == machine::Opcode::add_i64 &&
+                        arithmetic_flag_results.find(instruction.result) == arithmetic_flag_results.end()) {
+                        emit_lea_offset(out, Register::eax, source, static_cast<std::int32_t>(instruction.immediate), true);
+                    } else {
+                        emit_mov_register64(out, Register::eax, source);
+                        emit_integer_immediate_binary(out, instruction.opcode, Register::eax,
+                                                      static_cast<std::int32_t>(instruction.immediate), true);
+                    }
+                    break;
+                }
+                if (instruction.result < strict_integer_source.size() &&
+                    strict_integer_source[instruction.result] == strict_integer_rax) {
+                    const auto strict_reg = [&](machine::VirtualRegister reg) -> std::optional<Register> {
+                        if (reg >= strict_integer_source.size() || strict_integer_source[reg] < 0 ||
+                            strict_integer_source[reg] == strict_integer_rax) return std::nullopt;
+                        return static_cast<Register>(strict_integer_source[reg]);
+                    };
+                    if (instruction.symbol == "$imm") {
+                        if (instruction.inputs.size() != 1U ||
+                            instruction.immediate < std::numeric_limits<std::int32_t>::min() ||
+                            instruction.immediate > std::numeric_limits<std::int32_t>::max()) {
+                            add_error(diagnostics, "malformed strict i64 immediate arithmetic in @" + function.name); return encoded;
+                        }
+                        if (strict_integer_source[instruction.inputs[0]] != strict_integer_rax) {
+                            const auto source = strict_reg(instruction.inputs[0]);
+                            if (!source) { add_error(diagnostics, "invalid strict i64 source in @" + function.name); return encoded; }
+                            if (instruction.opcode == machine::Opcode::add_i64 &&
+                                arithmetic_flag_results.find(instruction.result) == arithmetic_flag_results.end())
+                                emit_lea_offset(out, Register::eax, *source, static_cast<std::int32_t>(instruction.immediate), true);
+                            else {
+                                emit_mov_register64(out, Register::eax, *source);
+                                emit_integer_immediate_binary(out, instruction.opcode, Register::eax,
+                                                              static_cast<std::int32_t>(instruction.immediate), true);
+                            }
+                        } else {
+                            emit_integer_immediate_binary(out, instruction.opcode, Register::eax,
+                                                          static_cast<std::int32_t>(instruction.immediate), true);
+                        }
+                        break;
+                    }
+                    if (instruction.inputs.size() != 2U) {
+                        add_error(diagnostics, "malformed strict i64 arithmetic in @" + function.name); return encoded;
+                    }
+                    const bool left_rax = strict_integer_source[instruction.inputs[0]] == strict_integer_rax;
+                    const bool right_rax = strict_integer_source[instruction.inputs[1]] == strict_integer_rax;
+                    const auto left = strict_reg(instruction.inputs[0]);
+                    const auto right = strict_reg(instruction.inputs[1]);
+                    if (!left_rax && !right_rax && instruction.opcode == machine::Opcode::add_i64 &&
+                        arithmetic_flag_results.find(instruction.result) == arithmetic_flag_results.end() && left && right) {
+                        emit_lea_sum(out, Register::eax, *left, *right, true);
+                        break;
+                    }
+                    const bool commutative = instruction.opcode != machine::Opcode::sub_i64;
+                    if (left_rax) {
+                        if (!right) { add_error(diagnostics, "invalid strict i64 right source in @" + function.name); return encoded; }
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *right, true);
+                    } else if (right_rax && commutative) {
+                        if (!left) { add_error(diagnostics, "invalid strict i64 left source in @" + function.name); return encoded; }
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *left, true);
+                    } else {
+                        if (!left || !right) { add_error(diagnostics, "invalid strict i64 seed sources in @" + function.name); return encoded; }
+                        emit_mov_register64(out, Register::eax, *left);
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *right, true);
+                    }
+                    break;
+                }
+                if (instruction.symbol == "$memptr") {
+                    if (instruction.inputs.size() != 2) { add_error(diagnostics, "malformed i64 pointer-memory arithmetic instruction in @" + function.name); return encoded; }
+                    const auto& left = allocation.location(instruction.inputs[0]);
+                    const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                    const auto& destination = allocation.location(instruction.result);
+                    Register pointer = Register::ecx;
+                    if (pointer_location.kind == machine::LocationKind::physical_register)
+                        pointer = integer_register(pointer_location.physical);
+                    else
+                        emit_read_location64(out, pointer, pointer_location);
+                    if (destination.kind == machine::LocationKind::physical_register) {
+                        const auto target = integer_register(destination.physical);
+                        if (!same_location(destination, left)) emit_read_location64(out, target, left);
+                        emit_integer_ptr_binary(out, instruction.opcode, target, pointer,
+                                                static_cast<std::int32_t>(instruction.immediate), true);
+                        if (same_location(destination, left)) ++encoded.two_address_reuse_count;
+                    } else {
+                        emit_read_location64(out, Register::eax, left);
+                        emit_integer_ptr_binary(out, instruction.opcode, Register::eax, pointer,
+                                                static_cast<std::int32_t>(instruction.immediate), true);
+                        write_integer_cached64(destination, Register::eax);
+                    }
+                    break;
+                }
                 if (instruction.symbol == "$memstack") {
                     if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed i64 memory arithmetic instruction in @" + function.name); return encoded; }
                     emit_read_location64(out, Register::eax, allocation.location(instruction.inputs[0]));
@@ -2932,8 +3794,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                             }
                         }
                     }
-                    if (instruction.opcode == machine::Opcode::add_i64 &&
-                        source_location.kind == machine::LocationKind::physical_register &&
+                    if (source_location.kind == machine::LocationKind::physical_register &&
                         result_location.kind == machine::LocationKind::physical_register &&
                         same_location(source_location, result_location)) {
                         emit_integer_immediate_binary(out, instruction.opcode,
@@ -3014,6 +3875,86 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             case machine::Opcode::and_i32:
             case machine::Opcode::or_i32:
             case machine::Opcode::xor_i32: {
+                if (instruction.result < strict_integer_source.size() &&
+                    strict_integer_source[instruction.result] == strict_integer_rax) {
+                    const auto strict_reg = [&](machine::VirtualRegister reg) -> std::optional<Register> {
+                        if (reg >= strict_integer_source.size() || strict_integer_source[reg] < 0 ||
+                            strict_integer_source[reg] == strict_integer_rax) return std::nullopt;
+                        return static_cast<Register>(strict_integer_source[reg]);
+                    };
+                    if (instruction.symbol == "$imm") {
+                        if (instruction.inputs.size() != 1U ||
+                            instruction.immediate < std::numeric_limits<std::int32_t>::min() ||
+                            instruction.immediate > std::numeric_limits<std::int32_t>::max()) {
+                            add_error(diagnostics, "malformed strict i32 immediate arithmetic in @" + function.name); return encoded;
+                        }
+                        if (strict_integer_source[instruction.inputs[0]] != strict_integer_rax) {
+                            const auto source = strict_reg(instruction.inputs[0]);
+                            if (!source) { add_error(diagnostics, "invalid strict i32 source in @" + function.name); return encoded; }
+                            if (instruction.opcode == machine::Opcode::add_i32 &&
+                                arithmetic_flag_results.find(instruction.result) == arithmetic_flag_results.end())
+                                emit_lea_offset(out, Register::eax, *source, static_cast<std::int32_t>(instruction.immediate), false);
+                            else {
+                                emit_mov_register(out, Register::eax, *source);
+                                emit_integer_immediate_binary(out, instruction.opcode, Register::eax,
+                                                              static_cast<std::int32_t>(instruction.immediate), false);
+                            }
+                        } else {
+                            emit_integer_immediate_binary(out, instruction.opcode, Register::eax,
+                                                          static_cast<std::int32_t>(instruction.immediate), false);
+                        }
+                        break;
+                    }
+                    if (instruction.inputs.size() != 2U) {
+                        add_error(diagnostics, "malformed strict i32 arithmetic in @" + function.name); return encoded;
+                    }
+                    const bool left_rax = strict_integer_source[instruction.inputs[0]] == strict_integer_rax;
+                    const bool right_rax = strict_integer_source[instruction.inputs[1]] == strict_integer_rax;
+                    const auto left = strict_reg(instruction.inputs[0]);
+                    const auto right = strict_reg(instruction.inputs[1]);
+                    if (!left_rax && !right_rax && instruction.opcode == machine::Opcode::add_i32 &&
+                        arithmetic_flag_results.find(instruction.result) == arithmetic_flag_results.end() && left && right) {
+                        emit_lea_sum(out, Register::eax, *left, *right, false);
+                        break;
+                    }
+                    const bool commutative = instruction.opcode != machine::Opcode::sub_i32;
+                    if (left_rax) {
+                        if (!right) { add_error(diagnostics, "invalid strict i32 right source in @" + function.name); return encoded; }
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *right, false);
+                    } else if (right_rax && commutative) {
+                        if (!left) { add_error(diagnostics, "invalid strict i32 left source in @" + function.name); return encoded; }
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *left, false);
+                    } else {
+                        if (!left || !right) { add_error(diagnostics, "invalid strict i32 seed sources in @" + function.name); return encoded; }
+                        emit_mov_register(out, Register::eax, *left);
+                        emit_two_address_binary(out, instruction.opcode, Register::eax, *right, false);
+                    }
+                    break;
+                }
+                if (instruction.symbol == "$memptr") {
+                    if (instruction.inputs.size() != 2) { add_error(diagnostics, "malformed pointer-memory arithmetic instruction in @" + function.name); return encoded; }
+                    const auto& left = allocation.location(instruction.inputs[0]);
+                    const auto& pointer_location = allocation.location(instruction.inputs[1]);
+                    const auto& destination = allocation.location(instruction.result);
+                    Register pointer = Register::ecx;
+                    if (pointer_location.kind == machine::LocationKind::physical_register)
+                        pointer = integer_register(pointer_location.physical);
+                    else
+                        emit_read_location64(out, pointer, pointer_location);
+                    if (destination.kind == machine::LocationKind::physical_register) {
+                        const auto target = integer_register(destination.physical);
+                        if (!same_location(destination, left)) emit_read_location(out, target, left);
+                        emit_integer_ptr_binary(out, instruction.opcode, target, pointer,
+                                                static_cast<std::int32_t>(instruction.immediate), false);
+                        if (same_location(destination, left)) ++encoded.two_address_reuse_count;
+                    } else {
+                        emit_read_location(out, Register::eax, left);
+                        emit_integer_ptr_binary(out, instruction.opcode, Register::eax, pointer,
+                                                static_cast<std::int32_t>(instruction.immediate), false);
+                        write_integer_cached32(destination, Register::eax);
+                    }
+                    break;
+                }
                 if (instruction.symbol == "$memstack") {
                     if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed memory arithmetic instruction in @" + function.name); return encoded; }
                     emit_read_location(out, Register::eax, allocation.location(instruction.inputs[0]));
@@ -3059,8 +4000,7 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                             }
                         }
                     }
-                    if (instruction.opcode == machine::Opcode::add_i32 &&
-                        source_location.kind == machine::LocationKind::physical_register &&
+                    if (source_location.kind == machine::LocationKind::physical_register &&
                         result_location.kind == machine::LocationKind::physical_register &&
                         same_location(source_location, result_location)) {
                         emit_integer_immediate_binary(out, instruction.opcode,
@@ -3388,8 +4328,40 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                 const std::span call_args = aggregate_call
                     ? std::span(instruction.inputs.data() + 1, instruction.inputs.size() - 1)
                     : std::span(instruction.inputs);
+
+                // A direct value call whose result is immediately returned is a
+                // true sibling/tail call when every outgoing argument fits in an
+                // ABI register. Stack-argument tail calls need a separate incoming
+                // stack-slot shuffle, so keep those on the normal call path.
+                bool register_only_tail_call = !aggregate_call &&
+                    instruction.result < direct_call_return.size() &&
+                    direct_call_return[instruction.result] &&
+                    instruction.opcode != machine::Opcode::call_void;
+                if (register_only_tail_call) {
+                    std::vector<machine::RegisterClass> tail_classes;
+                    tail_classes.reserve(call_args.size());
+                    for (const auto reg : call_args) tail_classes.push_back(function.register_classes[reg]);
+                    const auto tail_placements = classify_arguments(tail_classes, abi);
+                    register_only_tail_call = std::none_of(
+                        tail_placements.begin(), tail_placements.end(),
+                        [](const AbiPlacement& placement) { return placement.kind == AbiPlacement::Kind::stack; });
+                }
+
                 const auto prepared_call = prepare_call_arguments(call_args, aggregate_call
                     ? std::optional<machine::VirtualRegister>(instruction.inputs[0]) : std::nullopt);
+                if (register_only_tail_call) {
+                    // Argument registers are already populated. Restore the
+                    // caller-visible stack/callee-saved state and transfer control
+                    // directly; the callee will return to our caller.
+                    emit_frame_restore();
+                    out.byte(0xE9);
+                    const auto jump_offset = out.size();
+                    out.i32(0);
+                    encoded.calls.push_back({jump_offset, instruction.symbol});
+                    emitted_direct_tail_call[instruction.result] = true;
+                    break;
+                }
+
                 out.byte(0xE8);
                 const auto call_offset = out.size();
                 out.i32(0);
@@ -3613,8 +4585,15 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
             case machine::Opcode::return_f64: {
                 const bool wide = instruction.opcode == machine::Opcode::return_f64;
                 if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed floating return in @" + function.name); return encoded; }
-                if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]])
+                if (instruction.inputs[0] < emitted_direct_tail_call.size() &&
+                    emitted_direct_tail_call[instruction.inputs[0]])
+                    break;
+                if (instruction.inputs[0] < strict_float_xmm.size() && strict_float_xmm[instruction.inputs[0]] >= 0) {
+                    const auto source = static_cast<XmmRegister>(strict_float_xmm[instruction.inputs[0]]);
+                    emit_sse_move(out, XmmRegister::xmm0, source, wide);
+                } else if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]]) {
                     emit_read_float_location(out, XmmRegister::xmm0, allocation.location(instruction.inputs[0]), wide);
+                }
                 emit_epilogue();
                 break;
             }
@@ -3643,8 +4622,15 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     break;
                 }
                 if (instruction.inputs.size() != 1) { add_error(diagnostics, "malformed i64 return in @" + function.name); return encoded; }
-                if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]])
-                    emit_read_location64(out, Register::eax, allocation.location(instruction.inputs[0]));
+                if (instruction.inputs[0] < emitted_direct_tail_call.size() &&
+                    emitted_direct_tail_call[instruction.inputs[0]])
+                    break;
+                if ((instruction.inputs[0] >= strict_integer_source.size() ||
+                     strict_integer_source[instruction.inputs[0]] != strict_integer_rax) &&
+                    (instruction.inputs[0] >= direct_store_return_rax.size() || !direct_store_return_rax[instruction.inputs[0]])) {
+                    if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]])
+                        emit_read_location64(out, Register::eax, allocation.location(instruction.inputs[0]));
+                }
                 emit_epilogue();
                 break;
             case machine::Opcode::return_i32:
@@ -3671,8 +4657,14 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
                     add_error(diagnostics, "malformed return in @" + function.name);
                     return encoded;
                 }
-                if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]])
-                    emit_read_location(out, Register::eax, allocation.location(instruction.inputs[0]));
+                if (instruction.inputs[0] < emitted_direct_tail_call.size() &&
+                    emitted_direct_tail_call[instruction.inputs[0]])
+                    break;
+                if (instruction.inputs[0] >= strict_integer_source.size() ||
+                    strict_integer_source[instruction.inputs[0]] != strict_integer_rax) {
+                    if (instruction.inputs[0] >= direct_call_return.size() || !direct_call_return[instruction.inputs[0]])
+                        emit_read_location(out, Register::eax, allocation.location(instruction.inputs[0]));
+                }
                 emit_epilogue();
                 break;
             case machine::Opcode::return_void:
@@ -3815,7 +4807,42 @@ EncodedFunction encode_function(const machine::Function& source_function, Abi ab
     for (auto& call : encoded.calls) call.displacement_offset = remap_offset(call.displacement_offset);
     for (auto& address : encoded.addresses) address.displacement_offset = remap_offset(address.displacement_offset);
     for (auto& address : encoded.global_addresses) address.address_offset = remap_offset(address.address_offset);
+    for (auto& literal : floating_literal_fixups) literal.displacement_offset = remap_offset(literal.displacement_offset);
     out.replace(std::move(relaxed_code));
+
+    // Keep non-zero floating constants in a tiny deduplicated literal pool at
+    // the end of the function. RIP-relative loads avoid the movabs+movq pair
+    // and work identically in JIT images and relocatable object output.
+    struct LiteralKey {
+        std::uint64_t bits{};
+        bool wide{};
+        bool operator==(const LiteralKey&) const = default;
+    };
+    struct LiteralKeyHash {
+        std::size_t operator()(const LiteralKey& key) const noexcept {
+            return std::hash<std::uint64_t>{}(key.bits ^ (key.wide ? (1ULL << 63U) : 0ULL));
+        }
+    };
+    std::unordered_map<LiteralKey, std::size_t, LiteralKeyHash> literal_offsets;
+    for (const auto& literal : floating_literal_fixups) {
+        const LiteralKey key{literal.bits, literal.wide};
+        auto found = literal_offsets.find(key);
+        if (found == literal_offsets.end()) {
+            const auto alignment = literal.wide ? 8U : 4U;
+            while ((out.size() & (alignment - 1U)) != 0U) out.byte(0x90);
+            const auto offset = out.size();
+            if (literal.wide) out.i64(static_cast<std::int64_t>(literal.bits));
+            else out.i32(static_cast<std::int32_t>(static_cast<std::uint32_t>(literal.bits)));
+            found = literal_offsets.emplace(key, offset).first;
+        }
+        const auto source_after_disp = literal.displacement_offset + 4U;
+        const auto delta = static_cast<std::int64_t>(found->second) - static_cast<std::int64_t>(source_after_disp);
+        if (delta < std::numeric_limits<std::int32_t>::min() || delta > std::numeric_limits<std::int32_t>::max()) {
+            add_error(diagnostics, "floating literal displacement out of range in @" + function.name);
+            return encoded;
+        }
+        out.patch_i32(literal.displacement_offset, static_cast<std::int32_t>(delta));
+    }
 
     encoded.encoded_byte_count = static_cast<std::uint32_t>(out.size());
     if (encoded.machine_instruction_count_before_optimization == 0U)
@@ -3865,18 +4892,36 @@ ImageEncodeResult assemble_image(std::vector<EncodedFunction> functions,
         for (const auto byte : global.initializer) bytes.push_back(static_cast<std::byte>(byte));
     }
 
+    std::unordered_set<std::string> encoded_function_names;
+    for (const auto& function : functions) encoded_function_names.insert(function.name);
+    std::unordered_set<std::string> internal_call_targets;
+    for (const auto& function : functions)
+        for (const auto& call : function.calls)
+            if (encoded_function_names.contains(call.target)) internal_call_targets.insert(call.target);
+
+    std::vector<std::size_t> function_bases;
+    function_bases.reserve(functions.size());
     for (const auto& function : functions) {
-        if (!entries.emplace(function.name, result.image.code.size()).second) {
+        // Align real internal call targets to the conventional 16-byte x86-64
+        // function boundary. Non-target functions remain packed, avoiding the
+        // code-size cost of blanket alignment while making hot callees stable
+        // against unrelated code-size changes in preceding functions.
+        if (internal_call_targets.contains(function.name))
+            while ((result.image.code.size() & 15U) != 0U) result.image.code.push_back(std::byte{0x90});
+        const auto function_base = result.image.code.size();
+        function_bases.push_back(function_base);
+        if (!entries.emplace(function.name, function_base).second) {
             add_error(result.diagnostics, "duplicate encoded function @" + function.name);
             return result;
         }
-        result.image.entries.emplace_back(function.name, result.image.code.size());
+        result.image.entries.emplace_back(function.name, function_base);
         result.image.code.insert(result.image.code.end(), function.code.begin(), function.code.end());
     }
     result.functions = functions;
 
-    std::size_t base = 0;
-    for (const auto& function : functions) {
+    for (std::size_t function_index = 0; function_index < functions.size(); ++function_index) {
+        const auto& function = functions[function_index];
+        const auto base = function_bases[function_index];
         for (const auto& call : function.calls) {
             auto target = entries.find(call.target);
             if (target == entries.end()) {
@@ -3945,7 +4990,6 @@ ImageEncodeResult assemble_image(std::vector<EncodedFunction> functions,
                 return result;
             }
         }
-        base += function.code.size();
     }
     return result;
 }

@@ -62,6 +62,11 @@ public:
     std::string name() const override { return "constant-trip-loop-unroll"; }
     pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
 };
+class RuntimeCountedLoopUnrollPass final : public pass::FunctionPass {
+public:
+    std::string name() const override { return "runtime-counted-loop-unroll"; }
+    pass::PassResult run(ir::Function&, analysis::FunctionAnalysisManager&) override;
+};
 class LoopInvariantCodeMotionPass final : public pass::FunctionPass {
 public:
     std::string name() const override { return "licm"; }

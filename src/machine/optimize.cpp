@@ -639,6 +639,120 @@ OptimizationStats optimize_function(Function& function) {
         }
     }
 
+    // Fold single-use pointer loads into integer arithmetic memory operands.
+    // This is the pointer analogue of the local-stack fold above and maps to
+    // x86-64 reg,[base+disp] forms. If the load address is itself a single-use
+    // ptr.offset, absorb that displacement too so both temporary definitions
+    // disappear before register allocation.
+    for (auto& block : function.blocks) {
+        for (auto& instruction : block.instructions) {
+            const bool supported = instruction.opcode == Opcode::add_i32 || instruction.opcode == Opcode::add_i64 ||
+                                   instruction.opcode == Opcode::sub_i32 || instruction.opcode == Opcode::sub_i64 ||
+                                   instruction.opcode == Opcode::mul_i32 || instruction.opcode == Opcode::mul_i64 ||
+                                   instruction.opcode == Opcode::and_i32 || instruction.opcode == Opcode::and_i64 ||
+                                   instruction.opcode == Opcode::or_i32 || instruction.opcode == Opcode::or_i64 ||
+                                   instruction.opcode == Opcode::xor_i32 || instruction.opcode == Opcode::xor_i64;
+            if (!supported || instruction.inputs.size() != 2U || !instruction.symbol.empty()) continue;
+            const bool wide = instruction.opcode == Opcode::add_i64 || instruction.opcode == Opcode::sub_i64 ||
+                              instruction.opcode == Opcode::mul_i64 || instruction.opcode == Opcode::and_i64 ||
+                              instruction.opcode == Opcode::or_i64 || instruction.opcode == Opcode::xor_i64;
+            const bool commutative = instruction.opcode != Opcode::sub_i32 && instruction.opcode != Opcode::sub_i64;
+
+            std::size_t loaded_index = 1U;
+            auto loaded_reg = instruction.inputs[loaded_index];
+            auto* load = loaded_reg < definitions.size() ? definitions[loaded_reg] : nullptr;
+            const auto matches_load = [&](const Instruction* candidate) {
+                return candidate != nullptr && candidate->inputs.size() == 1U &&
+                       ((wide && candidate->opcode == Opcode::load_ptr_i64) ||
+                        (!wide && candidate->opcode == Opcode::load_ptr_i32));
+            };
+            if ((!matches_load(load) || use_counts[loaded_reg] != 1U) && commutative) {
+                loaded_index = 0U;
+                loaded_reg = instruction.inputs[loaded_index];
+                load = loaded_reg < definitions.size() ? definitions[loaded_reg] : nullptr;
+            }
+            if (!matches_load(load) || use_counts[loaded_reg] != 1U) continue;
+            if (loaded_index == 0U) std::swap(instruction.inputs[0], instruction.inputs[1]);
+
+            auto pointer = load->inputs.front();
+            auto displacement = load->immediate;
+            auto* pointer_definition = pointer < definitions.size() ? definitions[pointer] : nullptr;
+            if (pointer_definition != nullptr && pointer_definition->opcode == Opcode::ptr_offset &&
+                pointer_definition->inputs.size() == 1U && use_counts[pointer] == 1U) {
+                const auto combined = displacement + pointer_definition->immediate;
+                if (combined >= std::numeric_limits<std::int32_t>::min() &&
+                    combined <= std::numeric_limits<std::int32_t>::max()) {
+                    displacement = combined;
+                    pointer = pointer_definition->inputs.front();
+                    pointer_definition->immediate = 0;
+                    folded_address[load->inputs.front()] = true;
+                }
+            }
+            if (displacement < std::numeric_limits<std::int32_t>::min() ||
+                displacement > std::numeric_limits<std::int32_t>::max()) continue;
+
+            instruction.inputs[1] = pointer;
+            instruction.immediate = displacement;
+            instruction.symbol = "$memptr";
+            eliminated_load[loaded_reg] = true;
+            ++stats.load_arithmetic_folded;
+        }
+    }
+
+    // Fold single-use floating pointer loads into scalar SSE arithmetic
+    // memory operands. This keeps array/struct kernels from allocating an XMM
+    // register (or spill slot) solely to hold a value consumed by one add/mul.
+    for (auto& block : function.blocks) {
+        for (auto& instruction : block.instructions) {
+            const bool supported = instruction.opcode == Opcode::add_f32 || instruction.opcode == Opcode::add_f64 ||
+                                   instruction.opcode == Opcode::sub_f32 || instruction.opcode == Opcode::sub_f64 ||
+                                   instruction.opcode == Opcode::mul_f32 || instruction.opcode == Opcode::mul_f64 ||
+                                   instruction.opcode == Opcode::div_f32 || instruction.opcode == Opcode::div_f64;
+            if (!supported || instruction.inputs.size() != 2U || !instruction.symbol.empty()) continue;
+            const bool wide = instruction.opcode == Opcode::add_f64 || instruction.opcode == Opcode::sub_f64 ||
+                              instruction.opcode == Opcode::mul_f64 || instruction.opcode == Opcode::div_f64;
+            const bool commutative = instruction.opcode == Opcode::add_f32 || instruction.opcode == Opcode::add_f64 ||
+                                     instruction.opcode == Opcode::mul_f32 || instruction.opcode == Opcode::mul_f64;
+            std::size_t loaded_index = 1U;
+            auto loaded_reg = instruction.inputs[loaded_index];
+            auto* load = loaded_reg < definitions.size() ? definitions[loaded_reg] : nullptr;
+            const auto matches = [&](const Instruction* candidate) {
+                return candidate != nullptr && candidate->inputs.size() == 1U &&
+                       ((wide && candidate->opcode == Opcode::load_ptr_f64) ||
+                        (!wide && candidate->opcode == Opcode::load_ptr_f32));
+            };
+            if ((!matches(load) || use_counts[loaded_reg] != 1U) && commutative) {
+                loaded_index = 0U;
+                loaded_reg = instruction.inputs[loaded_index];
+                load = loaded_reg < definitions.size() ? definitions[loaded_reg] : nullptr;
+            }
+            if (!matches(load) || use_counts[loaded_reg] != 1U) continue;
+            if (loaded_index == 0U) std::swap(instruction.inputs[0], instruction.inputs[1]);
+
+            auto pointer = load->inputs.front();
+            auto displacement = load->immediate;
+            auto* pointer_definition = pointer < definitions.size() ? definitions[pointer] : nullptr;
+            if (pointer_definition != nullptr && pointer_definition->opcode == Opcode::ptr_offset &&
+                pointer_definition->inputs.size() == 1U && use_counts[pointer] == 1U) {
+                const auto combined = displacement + pointer_definition->immediate;
+                if (combined >= std::numeric_limits<std::int32_t>::min() &&
+                    combined <= std::numeric_limits<std::int32_t>::max()) {
+                    displacement = combined;
+                    pointer = pointer_definition->inputs.front();
+                    pointer_definition->immediate = 0;
+                    folded_address[load->inputs.front()] = true;
+                }
+            }
+            if (displacement < std::numeric_limits<std::int32_t>::min() ||
+                displacement > std::numeric_limits<std::int32_t>::max()) continue;
+            instruction.inputs[1] = pointer;
+            instruction.immediate = displacement;
+            instruction.symbol = "$memptr";
+            eliminated_load[loaded_reg] = true;
+            ++stats.load_arithmetic_folded;
+        }
+    }
+
     // Fuse a comparison used only by a conditional branch. The branch retains
     // the original comparison operands and condition in its immediate field,
     // allowing the encoder to emit cmp+jcc directly without materializing i1.
@@ -776,30 +890,73 @@ OptimizationStats optimize_function(Function& function) {
             stats.floating_compare_branch_bytes_avoided += 8U;
         }
     }
+    // Fold ptr.offset values when every effective live use is an address use.
+    // A single address temporary is commonly shared by a load and store; x86
+    // can encode [base+disp] independently at both sites, so requiring exactly
+    // one SSA use needlessly materializes address registers. Loads previously
+    // folded into $memptr arithmetic remain in the machine list until cleanup;
+    // ignore those dead definitions and reason about the replacement address
+    // operand instead.
     for (auto& block : function.blocks) {
         for (auto& definition : block.instructions) {
             if (definition.opcode != Opcode::ptr_offset || definition.inputs.size() != 1U ||
-                definition.result >= function.register_count || use_counts[definition.result] != 1U) continue;
-            Instruction* consumer = nullptr;
-            std::size_t operand_index = 0U;
+                definition.result >= function.register_count || definition.immediate == 0) continue;
+
+            struct AddressUse { Instruction* instruction; std::size_t operand_index; };
+            std::vector<AddressUse> address_uses;
+            bool unsafe_use = false;
             for (auto& search_block : function.blocks) {
                 for (auto& candidate : search_block.instructions) {
-                    if (!is_pointer_memory_operation(candidate.opcode)) continue;
-                    const auto index = pointer_operand_index(candidate.opcode);
-                    if (candidate.inputs.size() > index && candidate.inputs[index] == definition.result) {
-                        consumer = &candidate;
-                        operand_index = index;
+                    if (candidate.result < eliminated_load.size() && eliminated_load[candidate.result])
+                        continue;
+                    bool matched = false;
+                    if (is_pointer_memory_operation(candidate.opcode)) {
+                        const auto index = pointer_operand_index(candidate.opcode);
+                        if (candidate.inputs.size() > index && candidate.inputs[index] == definition.result) {
+                            address_uses.push_back({&candidate, index});
+                            matched = true;
+                        }
                     }
+                    if (!matched && candidate.symbol == "$memptr" && candidate.inputs.size() >= 2U &&
+                        candidate.inputs[1] == definition.result) {
+                        address_uses.push_back({&candidate, 1U});
+                        matched = true;
+                    }
+                    if (matched) continue;
+                    if (std::find(candidate.inputs.begin(), candidate.inputs.end(), definition.result) != candidate.inputs.end()) {
+                        unsafe_use = true;
+                        break;
+                    }
+                    for (const auto& successor : candidate.successors) {
+                        if (std::find(successor.arguments.begin(), successor.arguments.end(), definition.result) != successor.arguments.end()) {
+                            unsafe_use = true;
+                            break;
+                        }
+                    }
+                    if (unsafe_use) break;
+                }
+                if (unsafe_use) break;
+            }
+            if (unsafe_use || address_uses.empty()) continue;
+
+            bool encodable = true;
+            for (const auto& use : address_uses) {
+                const auto displacement = definition.immediate + use.instruction->immediate;
+                if (displacement < std::numeric_limits<std::int32_t>::min() ||
+                    displacement > std::numeric_limits<std::int32_t>::max()) {
+                    encodable = false;
+                    break;
                 }
             }
-            if (consumer == nullptr) continue;
-            const auto displacement = definition.immediate + consumer->immediate;
-            if (displacement < std::numeric_limits<std::int32_t>::min() ||
-                displacement > std::numeric_limits<std::int32_t>::max()) continue;
-            consumer->inputs[operand_index] = definition.inputs.front();
-            consumer->immediate = displacement;
+            if (!encodable) continue;
+
+            for (const auto& use : address_uses) {
+                use.instruction->inputs[use.operand_index] = definition.inputs.front();
+                use.instruction->immediate += definition.immediate;
+            }
             definition.immediate = 0;
             folded_address[definition.result] = true;
+            stats.address_modes_folded += static_cast<std::uint32_t>(address_uses.size());
         }
     }
 
@@ -867,7 +1024,8 @@ OptimizationStats optimize_function(Function& function) {
             }
             if (instruction.result < eliminated_load.size() && eliminated_load[instruction.result] &&
                 (instruction.opcode == Opcode::load_stack_i8 || instruction.opcode == Opcode::load_stack_i16 ||
-                 instruction.opcode == Opcode::load_stack_i32 || instruction.opcode == Opcode::load_stack_i64)) {
+                 instruction.opcode == Opcode::load_stack_i32 || instruction.opcode == Opcode::load_stack_i64 ||
+                 instruction.opcode == Opcode::load_ptr_i32 || instruction.opcode == Opcode::load_ptr_i64)) {
                 continue;
             }
             if (instruction.result < eliminated_extension.size() && eliminated_extension[instruction.result] &&

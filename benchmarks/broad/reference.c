@@ -12,9 +12,9 @@ __attribute__((noinline)) uint64_t llvm_int_mix(uint64_t seed, int64_t rounds) {
   }
   return x;
 }
-__attribute__((noinline)) int64_t llvm_fib(int64_t n) {
-  int64_t a=0,b=1;
-  for (int64_t i=0;i<n;++i) { int64_t s=a+b; a=b; b=s; }
+__attribute__((noinline)) uint64_t llvm_fib(int64_t n) {
+  uint64_t a=0,b=1;
+  for (int64_t i=0;i<n;++i) { uint64_t s=a+b; a=b; b=s; }
   return a;
 }
 __attribute__((noinline)) uint64_t llvm_branch_walk(uint64_t seed, int64_t rounds) {
@@ -51,9 +51,9 @@ __attribute__((noinline)) int64_t llvm_call_live(int64_t x) {
   int64_t called = llvm_call_leaf(x, 2, 3);
   return called + x;
 }
-__attribute__((noinline)) int64_t llvm_multi_recurrence(int64_t n) {
-  int64_t a=1,b=2,c=3,d=1;
-  for (int64_t i=0;i<n;++i) { int64_t next=(a+b)^(c+d); a=b; b=c; c=d; d=next; }
+__attribute__((noinline)) uint64_t llvm_multi_recurrence(int64_t n) {
+  uint64_t a=1,b=2,c=3,d=1;
+  for (int64_t i=0;i<n;++i) { uint64_t next=(a+b)^(c+d); a=b; b=c; c=d; d=next; }
   return a+b+c+d;
 }
 __attribute__((noinline)) uint64_t llvm_branch_merge(uint64_t seed, int64_t rounds) {

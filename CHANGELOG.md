@@ -2,6 +2,47 @@
 
 All notable changes to Forge are documented here. Forge follows [Semantic Versioning](https://semver.org/).
 
+## 2.0.2 - 2026-08-12
+
+### Optimizer and backend performance
+
+- Added a pre-runtime-unroll scalar-cleanup fixpoint so if-converted / CFG-fused loops are costed after dead copies and duplicate expressions have been removed, exposing profitable loops that previously looked artificially too large.
+- Refined generic runtime counted-loop unrolling to use 8x for tiny bodies, 4x for medium bodies, and 2x for heavier straight-line bodies, improving branch-heavy loops without excessive code growth.
+- Added two-address register affinity for integer `select`, allowing the false arm to occupy the final `CMOV` destination and eliminating repeated initializer copies.
+- Added compact byte-sized `TEST r8, imm8` lowering for low-byte masks, shrinking common bit-test / select sequences without changing semantics.
+- Added strict call-free floating ABI expression forwarding, keeping simple incoming XMM argument chains in ABI registers through the return rather than copying through allocator temporaries.
+- Added strict call-free integer ABI-to-RAX expression forwarding for single-use leaf expression chains.
+- Added deduplicated RIP-relative floating literal pools and rematerialized floating-literal loads, replacing repeated `movabs + movq` materialization.
+- Added compact 8-byte SysV call-alignment reservation and safe first-call ABI-register forwarding, reducing wrapper/call-chain shuffles.
+- Added single-use integer constant rematerialization directly at outgoing call argument uses.
+- Added direct compute -> pointer-store -> return forwarding so terminal stored values can remain in RAX/EAX through the store.
+- Preserved selective 16-byte alignment for actual internal call targets while rejecting broader hot-loop padding that did not produce a reliable net speedup.
+
+### Benchmark integrity and validation
+
+- Kept all corrected benchmark methodology unchanged: randomized differential validation, alternating Forge/LLVM timing order, benchmark-symbol production-source scan, unbiased read-only memory setup, and defined integer reference arithmetic.
+- Rejected residual-countdown and hot-loop-alignment experiments when repeated measurements did not justify their code-size or layout cost.
+- Full strict suite: 66/66 passing.
+- Corrected 13-sample Forge-vs-LLVM broad performance gates pass at both `-O2` and `-O3`.
+- `branch_walk` is approximately 0.85x LLVM on the final O2 run, `branch_merge` approximately parity, call-chain approximately parity, floating-call and floating-dot workloads approximately parity, with Forge `.text` at 1601 bytes versus LLVM's 1411 bytes for O2.
+
+## 2.0.1 - 2026-08-12
+
+### Performance and backend integrity
+
+- Generalized pointer-offset folding across multiple effective address-only uses, including loads already folded into `$memptr` arithmetic, so shared struct/array addresses encode directly as `[base+disp]` at each use.
+- Added direct integer pointer loads and stores to and from allocated physical registers, avoiding unnecessary `rax` shuttles.
+- Added direct destination accumulation for integer pointer-memory arithmetic instead of routing through `rax` when the result has a physical register.
+- Added scalar floating pointer-load folding into SSE arithmetic memory operands (`addss/addsd`, `subss/subsd`, `mulss/mulsd`, `divss/divsd`), eliminating short-lived XMM temporaries and spill traffic in array/vector-style kernels.
+- Extended machine verification for floating `$memptr` arithmetic so the address operand is correctly treated as integer-class while value operands remain floating-class.
+- Made stack-passed entry arguments frameless when no real local/spill frame exists, with rsp-relative entry parallel-copy sources that account for callee-save pushes, reserved outgoing call space, and temporary copy-cycle stack movement.
+- Preserved the hardened benchmark methodology and rejected broader ABI precoloring / incomplete frameless-entry experiments that failed semantic or ABI gates.
+
+### Validation
+
+- Full strict suite: 66/66 passing.
+- Corrected randomized Forge-vs-LLVM broad performance gates pass at both `-O2` and `-O3`.
+
 ## 2.0.0 - 2026-07-29
 
 ### Compiler and optimizer
@@ -11,6 +52,7 @@ All notable changes to Forge are documented here. Forge follows [Semantic Versio
 - Added generalized scalar-evolution reduction, conservative constant-trip unrolling, LICM hardening, merge-parameter simplification, and SSA diamond if-conversion.
 - Added dominance-aware and commutative CSE, predicate canonicalization, address-expression CSE, extended algebraic identities, and power-of-two unsigned division/remainder strength reduction.
 - Added broad x86 multiplication strength reduction for powers of two and scaled `LEA` families.
+- Added generic runtime counted-loop unrolling with scalar cleanup, control-only induction elimination, whole-loop LICM, and CFG block fusion so optimized loops are exposed without benchmark-specific recognition.
 
 ### Backend and register allocation
 
@@ -19,6 +61,8 @@ All notable changes to Forge are documented here. Forge follows [Semantic Versio
 - Added loop-edge affinity, destructive induction coalescing, direct physical copies, `xchg` swap lowering, hot-loop layout, and arithmetic-flags branch fusion.
 - Added direct arithmetic, compare, `TEST`, `CMOV`, immediate, stack-memory, and return-value lowering improvements.
 - Added frameless call-containing functions when no frame-resident data is required.
+- Added pointer-load arithmetic folding into x86 memory operands, prologue-reserved outgoing call areas, broader in-place immediate arithmetic, and less conservative incoming-register capture.
+- Added safe leaf-only use of additional caller-saved integer registers and improved constant rematerialization to reduce spills and frame traffic under pressure.
 
 ### Calls and floating point
 
@@ -26,9 +70,12 @@ All notable changes to Forge are documented here. Forge follows [Semantic Versio
 - Kept floating call arguments register-resident when they do not cross calls.
 - Added direct call-return forwarding and call-result forwarding into arithmetic and subsequent calls for integer and floating values.
 - Added register-resident floating entry arguments and direct XMM constant materialization.
+- Added conservative direct tail-call lowering for register-only direct calls and delayed floating rematerialization so values are rebuilt near their real post-call use instead of spanning another call.
 
 ### Correctness, validation, and release engineering
 
+- Hardened the broad Forge/LLVM benchmark against benchmark-specific compiler symbol checks, fixed-order timing bias, read-only-memory store-forwarding artifacts, and signed-overflow undefined behavior in recurrence references.
+- Expanded benchmark semantic validation from a handful of fixed examples to deterministic randomized differential checks across all workload families.
 - Fixed LICM terminator corruption, multi-register parallel-copy rotation, destructive recurrence coalescing, comparison-CSE typing, and XMM entry hazards.
 - Fixed Clang/MSVC Windows test-build portability by including `<algorithm>` explicitly where standard algorithms are used.
 - Expanded differential performance coverage to 16 independent Forge-versus-LLVM workload families with semantic checks, code-size accounting, and unchanged per-kernel gates.

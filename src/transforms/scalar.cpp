@@ -855,16 +855,17 @@ pass::PassResult LoopInvariantCodeMotionPass::run(ir::Function& function,
     };
 
     for (const auto& loop : loop_info.loops) {
-        if (loop.preheader.empty()) continue;
-        const auto header_it = std::find_if(function.blocks.begin(), function.blocks.end(),
-            [&](const ir::Block& block) { return block.name == loop.header; });
         const auto preheader_it = std::find_if(function.blocks.begin(), function.blocks.end(),
             [&](const ir::Block& block) { return block.name == loop.preheader; });
-        if (header_it == function.blocks.end() || preheader_it == function.blocks.end() || preheader_it->operations.empty()) continue;
-        auto& header = *header_it;
+        if (loop.preheader.empty() || preheader_it == function.blocks.end() ||
+            preheader_it->operations.empty()) continue;
+        const auto header_it = std::find_if(function.blocks.begin(), function.blocks.end(),
+            [&](const ir::Block& block) { return block.name == loop.header; });
+        if (header_it == function.blocks.end()) continue;
         auto& preheader = *preheader_it;
-        if (preheader.operations.back().opcode != "jump" || preheader.operations.back().successors.size() != 1U ||
-            preheader.operations.back().successors.front() != header.name) continue;
+        if (preheader.operations.back().opcode != "jump" ||
+            preheader.operations.back().successors.size() != 1U ||
+            preheader.operations.back().successors.front() != header_it->name) continue;
 
         std::unordered_set<std::string> loop_definitions;
         for (const auto& block : function.blocks) {
@@ -873,39 +874,44 @@ pass::PassResult LoopInvariantCodeMotionPass::run(ir::Function& function,
             for (const auto& operation : block.operations)
                 if (!operation.result.empty()) loop_definitions.insert(operation.result);
         }
+
+        // Speculatively hoist pure non-trapping operations from any block in
+        // the loop, not just the header. Repeating to a fixed point lets an
+        // invariant expression become movable after its invariant operands are
+        // hoisted. This is safe even for conditionally executed blocks because
+        // the accepted operations have no side effects and cannot trap.
         std::unordered_set<std::string> invariant;
-        std::vector<std::size_t> hoisted_indices;
-        for (std::size_t operation_index = 0; operation_index < header.operations.size(); ++operation_index) {
-            const auto& operation = header.operations[operation_index];
-            bool operands_invariant = true;
-            for (const auto& operand : operation.operands) {
-                if (!operand.starts_with('%')) continue;
-                if (loop_definitions.contains(operand) && !invariant.contains(operand)) {
-                    operands_invariant = false;
+        bool progress = true;
+        while (progress) {
+            progress = false;
+            for (auto& block : function.blocks) {
+                if (!loop.blocks.contains(block.name) || block.name == preheader.name) continue;
+                for (std::size_t operation_index = 0; operation_index < block.operations.size(); ++operation_index) {
+                    const auto& candidate = block.operations[operation_index];
+                    if (!is_hoistable(candidate)) continue;
+                    bool operands_invariant = true;
+                    for (const auto& operand : candidate.operands) {
+                        if (!operand.starts_with('%')) continue;
+                        if (loop_definitions.contains(operand) && !invariant.contains(operand)) {
+                            operands_invariant = false;
+                            break;
+                        }
+                    }
+                    if (!operands_invariant) continue;
+
+                    auto operation = candidate;
+                    invariant.insert(operation.result);
+                    block.operations.erase(block.operations.begin() +
+                                           static_cast<std::ptrdiff_t>(operation_index));
+                    preheader.operations.insert(preheader.operations.end() - 1, std::move(operation));
+                    result.changed = true;
+                    ++result.operations_rewritten;
+                    progress = true;
                     break;
                 }
-            }
-            if (is_hoistable(operation) && operands_invariant) {
-                invariant.insert(operation.result);
-                hoisted_indices.push_back(operation_index);
+                if (progress) break;
             }
         }
-        if (hoisted_indices.empty()) continue;
-
-        // Copy selected operations before mutating either block. Keeping the
-        // terminator in place avoids destructive move-based reconstruction of
-        // the header and makes repeated/nested LICM runs structurally safe.
-        std::vector<ir::Operation> hoisted;
-        hoisted.reserve(hoisted_indices.size());
-        for (const auto operation_index : hoisted_indices)
-            hoisted.push_back(header.operations[operation_index]);
-        for (auto index = hoisted_indices.rbegin(); index != hoisted_indices.rend(); ++index)
-            header.operations.erase(header.operations.begin() + static_cast<std::ptrdiff_t>(*index));
-
-        const auto insertion = preheader.operations.end() - 1;
-        preheader.operations.insert(insertion, hoisted.begin(), hoisted.end());
-        result.changed = true;
-        result.operations_rewritten += hoisted.size();
     }
     return result;
 }
@@ -983,7 +989,7 @@ pass::PassResult IfConversionPass::run(ir::Function& function,
         bool safe = true;
         for (std::size_t i=0;i+1<true_block.operations.size();++i) safe = safe && safe_opcode(true_block.operations[i].opcode) && !true_block.operations[i].result.empty();
         for (std::size_t i=0;i+1<false_block.operations.size();++i) safe = safe && safe_opcode(false_block.operations[i].opcode) && !false_block.operations[i].result.empty();
-        if (!safe || true_block.operations.size() > 5U || false_block.operations.size() > 5U) continue;
+        if (!safe || true_block.operations.size() > 6U || false_block.operations.size() > 6U) continue;
         std::unordered_map<std::string,std::string> tmap, fmap;
         for (std::size_t i=0;i<true_block.parameters.size();++i) tmap[true_block.parameters[i].name]=branch.successor_arguments[0][i];
         for (std::size_t i=0;i<false_block.parameters.size();++i) fmap[false_block.parameters[i].name]=branch.successor_arguments[1][i];
@@ -1101,6 +1107,62 @@ pass::PassResult SimplifyCFGPass::run(ir::Function& function,
         function.blocks.end());
     result.blocks_removed = before - function.blocks.size();
     result.changed = result.blocks_removed != 0;
+
+    // Fuse unconditional jump chains when the destination has exactly one
+    // predecessor. This removes parameter-shuffling-only blocks and exposes
+    // larger straight-line regions to later loop/codegen optimizations.
+    for (;;) {
+        std::unordered_map<std::string, std::size_t> indices;
+        std::unordered_map<std::string, std::size_t> predecessors;
+        for (std::size_t i = 0; i < function.blocks.size(); ++i)
+            indices.emplace(function.blocks[i].name, i);
+        for (const auto& block : function.blocks) {
+            if (block.operations.empty()) continue;
+            for (const auto& successor : block.operations.back().successors)
+                ++predecessors[successor];
+        }
+
+        bool fused = false;
+        for (std::size_t source_index = 0; source_index < function.blocks.size() && !fused; ++source_index) {
+            auto& source = function.blocks[source_index];
+            if (source.operations.empty()) continue;
+            const auto& jump = source.operations.back();
+            if (jump.opcode != "jump" || jump.successors.size() != 1U ||
+                jump.successor_arguments.size() != 1U) continue;
+            const auto target_it = indices.find(jump.successors.front());
+            if (target_it == indices.end() || target_it->second == source_index ||
+                predecessors[jump.successors.front()] != 1U) continue;
+            const auto target_index = target_it->second;
+            const auto& target = function.blocks[target_index];
+            if (jump.successor_arguments.front().size() != target.parameters.size()) continue;
+
+            std::unordered_map<std::string, std::string> replacements;
+            for (std::size_t pi = 0; pi < target.parameters.size(); ++pi)
+                replacements[target.parameters[pi].name] = jump.successor_arguments.front()[pi];
+
+            std::vector<ir::Operation> appended;
+            appended.reserve(target.operations.size());
+            for (auto operation : target.operations) {
+                for (auto& operand : operation.operands)
+                    if (const auto mapped = replacements.find(operand); mapped != replacements.end())
+                        operand = mapped->second;
+                for (auto& arguments : operation.successor_arguments)
+                    for (auto& argument : arguments)
+                        if (const auto mapped = replacements.find(argument); mapped != replacements.end())
+                            argument = mapped->second;
+                appended.push_back(std::move(operation));
+            }
+
+            source.operations.pop_back();
+            source.operations.insert(source.operations.end(), appended.begin(), appended.end());
+            function.blocks.erase(function.blocks.begin() + static_cast<std::ptrdiff_t>(target_index));
+            result.changed = true;
+            ++result.blocks_removed;
+            result.operations_rewritten += appended.size();
+            fused = true;
+        }
+        if (!fused) break;
+    }
     return result;
 }
 
@@ -1676,6 +1738,363 @@ pass::PassResult ConstantTripLoopUnrollPass::run(
         result.changed = true;
         result.operations_rewritten += expanded.size();
         result.blocks_removed += 2U;
+        return result;
+    }
+    return result;
+}
+
+pass::PassResult RuntimeCountedLoopUnrollPass::run(
+    ir::Function& function, analysis::FunctionAnalysisManager&) {
+    pass::PassResult result;
+    if (function.blocks.size() < 4U) return result;
+
+    std::unordered_map<std::string, std::size_t> block_index;
+    std::unordered_map<std::string, long long> constants;
+    std::unordered_set<std::string> block_names;
+    for (std::size_t i = 0; i < function.blocks.size(); ++i) {
+        block_index.emplace(function.blocks[i].name, i);
+        block_names.insert(function.blocks[i].name);
+        for (const auto& operation : function.blocks[i].operations) {
+            if (operation.opcode == "const" && operation.operands.size() == 1U &&
+                !operation.result.empty()) {
+                if (const auto value = number(operation.operands.front()))
+                    constants[operation.result] = *value;
+            }
+        }
+    }
+
+    std::unordered_map<std::string, std::size_t> predecessor_count;
+    for (const auto& block : function.blocks) {
+        if (block.operations.empty()) continue;
+        for (const auto& successor : block.operations.back().successors)
+            ++predecessor_count[successor];
+    }
+
+    const auto unique_block_name = [&](std::string base) {
+        if (!block_names.contains(base)) return base;
+        for (std::size_t suffix = 0;; ++suffix) {
+            auto candidate = base + "." + std::to_string(suffix);
+            if (!block_names.contains(candidate)) return candidate;
+        }
+    };
+
+    for (std::size_t entry_index = 0; entry_index < function.blocks.size(); ++entry_index) {
+        const auto& entry = function.blocks[entry_index];
+        if (entry.operations.empty()) continue;
+        const auto& entry_jump = entry.operations.back();
+        if (entry_jump.opcode != "jump" || entry_jump.successors.size() != 1U ||
+            entry_jump.successor_arguments.size() != 1U) continue;
+
+        const auto header_it = block_index.find(entry_jump.successors.front());
+        if (header_it == block_index.end()) continue;
+        const auto header_index = header_it->second;
+        const auto& header = function.blocks[header_index];
+        // The fast loop check replaces visits to the original header while running
+        // four iterations at a time. Restrict this transform to a pure canonical
+        // header so no work or side effects are skipped between iterations.
+        if (header.parameters.empty() || header.operations.size() != 2U ||
+            entry_jump.successor_arguments.front().size() != header.parameters.size()) continue;
+        const auto& compare = header.operations[0];
+        const auto& branch = header.operations[1];
+        if (compare.opcode != "cmp.ge" || compare.operands.size() != 2U ||
+            compare.result.empty() || !compare.type.is_integer() ||
+            (compare.type.kind() != ir::TypeKind::i32 && compare.type.kind() != ir::TypeKind::i64) ||
+            branch.opcode != "branch" || branch.operands.size() != 1U ||
+            branch.operands.front() != compare.result || branch.successors.size() != 2U ||
+            branch.successor_arguments.size() != 2U) continue;
+        if (compare.operands.front() != header.parameters.front().name ||
+            header.parameters.front().type != compare.type) continue;
+
+        // Start at zero. This makes (limit - index) overflow-free whenever the
+        // unrolled path is entered, while negative limits naturally fall through
+        // to the original scalar header and preserve its zero-trip behavior.
+        const auto initial_it = constants.find(entry_jump.successor_arguments.front().front());
+        if (initial_it == constants.end() || initial_it->second != 0) continue;
+
+        const auto& limit = compare.operands[1];
+        bool limit_is_loop_carried = false;
+        for (const auto& parameter : header.parameters)
+            limit_is_loop_carried = limit_is_loop_carried || parameter.name == limit;
+        if (limit_is_loop_carried) continue;
+
+        const auto exit_it = block_index.find(branch.successors[0]);
+        const auto body_it = block_index.find(branch.successors[1]);
+        if (exit_it == block_index.end() || body_it == block_index.end()) continue;
+        const auto body_index = body_it->second;
+        const auto& body = function.blocks[body_index];
+        const auto& exit = function.blocks[exit_it->second];
+        if (body.operations.empty() || body.parameters.size() != header.parameters.size() ||
+            branch.successor_arguments[1].size() != body.parameters.size() ||
+            branch.successor_arguments[0].size() != exit.parameters.size() ||
+            predecessor_count[header.name] != 2U || predecessor_count[body.name] != 1U) continue;
+
+        const auto& backedge = body.operations.back();
+        if (backedge.opcode != "jump" || backedge.successors.size() != 1U ||
+            backedge.successors.front() != header.name || backedge.successor_arguments.size() != 1U ||
+            backedge.successor_arguments.front().size() != header.parameters.size()) continue;
+
+        // Keep this initial implementation focused on compact, straight-line
+        // arithmetic loops. The transform itself is generic; these guards only
+        // avoid excessive code growth and unusual trapping/side-effect cases.
+        if (body.operations.size() > 10U) continue;
+        bool safe_body = true;
+        for (std::size_t oi = 0; oi + 1U < body.operations.size(); ++oi) {
+            const auto& operation = body.operations[oi];
+            if (operation.has_side_effects() || operation.opcode == "div" || operation.opcode == "rem" ||
+                operation.opcode == "load" || operation.opcode == "load.f32" || operation.opcode == "load.f64") {
+                safe_body = false;
+                break;
+            }
+        }
+        if (!safe_body) continue;
+
+        // Tiny recurrence bodies are dominated by loop-control overhead and can
+        // profit from a larger factor without excessive code growth. Medium
+        // bodies use four copies; heavier straight-line bodies use two. This
+        // keeps branch-heavy loops eligible without multiplying their useful
+        // work four times and is based only on generic body size.
+        const auto useful_body_operations = body.operations.size() - 1U; // exclude backedge jump
+        const long long unroll_factor = useful_body_operations <= 3U ? 8LL :
+                                        useful_body_operations <= 6U ? 4LL : 2LL;
+
+        // The loop limit must be invariant across the accelerated portion.
+        bool limit_defined_in_loop = false;
+        for (const auto& operation : header.operations)
+            if (operation.result == limit) limit_defined_in_loop = true;
+        for (const auto& operation : body.operations)
+            if (operation.result == limit) limit_defined_in_loop = true;
+        if (limit_defined_in_loop) continue;
+
+        // Map each body parameter back to the header state value passed to it.
+        std::vector<std::size_t> body_from_header;
+        body_from_header.reserve(body.parameters.size());
+        bool direct_body_arguments = true;
+        for (const auto& argument : branch.successor_arguments[1]) {
+            std::optional<std::size_t> found;
+            for (std::size_t pi = 0; pi < header.parameters.size(); ++pi) {
+                if (argument == header.parameters[pi].name) {
+                    found = pi;
+                    break;
+                }
+            }
+            if (!found) {
+                direct_body_arguments = false;
+                break;
+            }
+            body_from_header.push_back(*found);
+        }
+        if (!direct_body_arguments || body_from_header.empty() || body_from_header.front() != 0U) continue;
+
+        // Require the canonical induction update i.next = i + 1.
+        const auto& next_index_name = backedge.successor_arguments.front().front();
+        const ir::Operation* index_update = nullptr;
+        std::size_t index_update_index = 0;
+        for (std::size_t oi = 0; oi + 1U < body.operations.size(); ++oi) {
+            if (body.operations[oi].result == next_index_name) {
+                index_update = &body.operations[oi];
+                index_update_index = oi;
+            }
+        }
+        if (index_update == nullptr || index_update->opcode != "add" ||
+            index_update->type != compare.type || index_update->operands.size() != 2U) continue;
+        const auto body_induction_name = body.parameters[0].name;
+        std::string step_name;
+        if (index_update->operands[0] == body_induction_name) step_name = index_update->operands[1];
+        else if (index_update->operands[1] == body_induction_name) step_name = index_update->operands[0];
+        else continue;
+        const auto step_it = constants.find(step_name);
+        if (step_it == constants.end() || step_it->second != 1) continue;
+
+        // If the induction value exists solely to control the loop, do not emit
+        // N separate +1 updates in the unrolled body. Advance it once by the
+        // unroll factor after all replicated work. This is the common case for
+        // counted loops whose body does not inspect the index.
+        bool induction_is_control_only = true;
+        for (std::size_t oi = 0; oi + 1U < body.operations.size(); ++oi) {
+            if (oi == index_update_index) continue;
+            for (const auto& operand : body.operations[oi].operands)
+                if (operand == body_induction_name) induction_is_control_only = false;
+        }
+        for (std::size_t ai = 1; ai < backedge.successor_arguments.front().size(); ++ai)
+            if (backedge.successor_arguments.front()[ai] == body_induction_name)
+                induction_is_control_only = false;
+
+        // When the induction value is used only by the loop control, exclude it
+        // from the accelerated loop state entirely. The fast loop then carries
+        // only useful recurrence values plus a remaining-trip counter. A tiny
+        // remainder bridge reconstructs the scalar-loop index once, only when
+        // the fast loop finishes. This avoids one induction add and one live
+        // register on every unrolled chunk.
+        const bool omit_induction_from_fast_state = induction_is_control_only;
+        std::vector<std::size_t> fast_state_indices;
+        for (std::size_t pi = omit_induction_from_fast_state ? 1U : 0U;
+             pi < header.parameters.size(); ++pi) {
+            fast_state_indices.push_back(pi);
+        }
+
+        const auto unroll_tag = ".unroll" + std::to_string(unroll_factor);
+        const auto check_name = unique_block_name(header.name + unroll_tag + ".check");
+        block_names.insert(check_name);
+        const auto unrolled_name = unique_block_name(header.name + unroll_tag + ".body");
+        block_names.insert(unrolled_name);
+        std::string remainder_name;
+        if (omit_induction_from_fast_state) {
+            remainder_name = unique_block_name(header.name + unroll_tag + ".remainder");
+            block_names.insert(remainder_name);
+        }
+        const auto value_prefix = "%ru." + header.name + ".";
+
+        ir::Block check;
+        check.name = check_name;
+        for (std::size_t si = 0; si < fast_state_indices.size(); ++si) {
+            auto parameter = header.parameters[fast_state_indices[si]];
+            parameter.name = value_prefix + "check.p" + std::to_string(si);
+            check.parameters.push_back(std::move(parameter));
+        }
+        const auto factor_name = value_prefix + "factor";
+        const auto enough_name = value_prefix + "enough";
+        ir::ValueDecl remaining_parameter{value_prefix + "check.remaining", compare.type};
+        check.parameters.push_back(remaining_parameter);
+        check.operations.push_back(make_operation(factor_name, "const", compare.type,
+                                                  {std::to_string(unroll_factor)}));
+        check.operations.push_back(make_operation(enough_name, "cmp.ge", compare.type,
+                                                  {remaining_parameter.name, factor_name}));
+        ir::Operation fast_branch;
+        fast_branch.opcode = "branch";
+        fast_branch.operands = {enough_name};
+        fast_branch.successors = {unrolled_name,
+                                  omit_induction_from_fast_state ? remainder_name : header.name};
+        fast_branch.successor_arguments.resize(2U);
+        for (const auto& parameter : check.parameters) {
+            if (parameter.name == remaining_parameter.name) continue;
+            fast_branch.successor_arguments[0].push_back(parameter.name);
+            fast_branch.successor_arguments[1].push_back(parameter.name);
+        }
+        fast_branch.successor_arguments[0].push_back(remaining_parameter.name);
+        if (omit_induction_from_fast_state)
+            fast_branch.successor_arguments[1].push_back(remaining_parameter.name);
+        check.operations.push_back(std::move(fast_branch));
+
+        ir::Block unrolled;
+        unrolled.name = unrolled_name;
+        for (std::size_t si = 0; si < fast_state_indices.size(); ++si) {
+            auto parameter = header.parameters[fast_state_indices[si]];
+            parameter.name = value_prefix + "body.p" + std::to_string(si);
+            unrolled.parameters.push_back(std::move(parameter));
+        }
+        ir::ValueDecl body_remaining{value_prefix + "body.remaining", compare.type};
+        unrolled.parameters.push_back(body_remaining);
+
+        std::vector<std::string> current;
+        current.reserve(fast_state_indices.size());
+        for (std::size_t si = 0; si < fast_state_indices.size(); ++si)
+            current.push_back(unrolled.parameters[si].name);
+
+        const auto state_slot_for_header = [&](std::size_t header_parameter) -> std::optional<std::size_t> {
+            for (std::size_t si = 0; si < fast_state_indices.size(); ++si)
+                if (fast_state_indices[si] == header_parameter) return si;
+            return std::nullopt;
+        };
+
+        for (long long iteration = 0; iteration < unroll_factor; ++iteration) {
+            std::unordered_map<std::string, std::string> values;
+            for (std::size_t si = 0; si < fast_state_indices.size(); ++si)
+                values[header.parameters[fast_state_indices[si]].name] = current[si];
+            for (std::size_t pi = 0; pi < body.parameters.size(); ++pi) {
+                const auto header_parameter = body_from_header[pi];
+                if (const auto slot = state_slot_for_header(header_parameter))
+                    values[body.parameters[pi].name] = current[*slot];
+            }
+
+            for (std::size_t oi = 0; oi + 1U < body.operations.size(); ++oi) {
+                if (omit_induction_from_fast_state && oi == index_update_index) {
+                    // No user-visible value consumes the induction result in this
+                    // mode; the scalar remainder reconstructs it from trip count.
+                    continue;
+                }
+                auto operation = body.operations[oi];
+                for (auto& operand : operation.operands)
+                    if (const auto mapped = values.find(operand); mapped != values.end())
+                        operand = mapped->second;
+                const auto old_result = operation.result;
+                if (!old_result.empty()) {
+                    operation.result = value_prefix + "i" + std::to_string(iteration) + ".op" +
+                                       std::to_string(oi);
+                    values[old_result] = operation.result;
+                }
+                unrolled.operations.push_back(std::move(operation));
+            }
+
+            std::vector<std::string> next;
+            next.reserve(fast_state_indices.size());
+            for (const auto header_parameter : fast_state_indices) {
+                auto value = backedge.successor_arguments.front()[header_parameter];
+                if (const auto mapped = values.find(value); mapped != values.end()) value = mapped->second;
+                next.push_back(std::move(value));
+            }
+            current = std::move(next);
+        }
+        const auto remaining_next = value_prefix + "remaining.next";
+        unrolled.operations.push_back(make_operation(remaining_next, "sub", compare.type,
+                                                      {body_remaining.name, factor_name}));
+        ir::Operation fast_backedge;
+        fast_backedge.opcode = "jump";
+        fast_backedge.successors = {check_name};
+        current.push_back(remaining_next);
+        fast_backedge.successor_arguments = {current};
+        unrolled.operations.push_back(std::move(fast_backedge));
+
+        std::optional<ir::Block> remainder;
+        if (omit_induction_from_fast_state) {
+            ir::Block bridge;
+            bridge.name = remainder_name;
+            for (std::size_t si = 0; si < fast_state_indices.size(); ++si) {
+                auto parameter = header.parameters[fast_state_indices[si]];
+                parameter.name = value_prefix + "remainder.p" + std::to_string(si);
+                bridge.parameters.push_back(std::move(parameter));
+            }
+            ir::ValueDecl bridge_remaining{value_prefix + "remainder.remaining", compare.type};
+            bridge.parameters.push_back(bridge_remaining);
+            const auto recovered_index = value_prefix + "remainder.index";
+            bridge.operations.push_back(make_operation(recovered_index, "sub", compare.type,
+                                                       {limit, bridge_remaining.name}));
+            ir::Operation to_scalar;
+            to_scalar.opcode = "jump";
+            to_scalar.successors = {header.name};
+            to_scalar.successor_arguments.resize(1U);
+            to_scalar.successor_arguments[0].push_back(recovered_index);
+            for (std::size_t si = 0; si < fast_state_indices.size(); ++si)
+                to_scalar.successor_arguments[0].push_back(bridge.parameters[si].name);
+            bridge.operations.push_back(std::move(to_scalar));
+            remainder = std::move(bridge);
+        }
+
+        // Redirect only the loop preheader. The original header/body remain as
+        // the scalar cleanup loop for residual iterations.
+        std::vector<ir::Block> rewritten;
+        rewritten.reserve(function.blocks.size() + (remainder ? 3U : 2U));
+        for (std::size_t bi = 0; bi < function.blocks.size(); ++bi) {
+            auto block = std::move(function.blocks[bi]);
+            if (bi == entry_index) {
+                auto& terminator = block.operations.back();
+                terminator.successors.front() = check_name;
+                if (omit_induction_from_fast_state)
+                    terminator.successor_arguments.front().erase(
+                        terminator.successor_arguments.front().begin());
+                terminator.successor_arguments.front().push_back(limit);
+                rewritten.push_back(std::move(block));
+                rewritten.push_back(std::move(check));
+                rewritten.push_back(std::move(unrolled));
+                if (remainder) rewritten.push_back(std::move(*remainder));
+            } else {
+                rewritten.push_back(std::move(block));
+            }
+        }
+        function.blocks = std::move(rewritten);
+        result.changed = true;
+        result.operations_rewritten = static_cast<std::size_t>(unroll_factor) *
+                                      (body.operations.size() - 1U) + check.operations.size() +
+                                      (remainder ? remainder->operations.size() : 0U) + 1U;
         return result;
     }
     return result;

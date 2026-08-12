@@ -423,6 +423,7 @@ LowerResult lower_module(const ir::Module& source) {
             begin = end;
         }
 
+
         for (std::size_t parameter_index = 0; parameter_index < function.parameters.size(); ++parameter_index) {
             const auto& parameter = function.parameters[parameter_index];
             if (!parameter.owned || aggregate_parameters[parameter_index].direct) continue;

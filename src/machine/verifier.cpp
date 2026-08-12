@@ -236,7 +236,15 @@ Diagnostics verify_module(const Module& module) {
                     }
                 }
                 if (requires_float_inputs(ins.opcode)) {
-                    for (const auto reg : ins.inputs) {
+                    for (std::size_t input_index = 0; input_index < ins.inputs.size(); ++input_index) {
+                        const auto reg = ins.inputs[input_index];
+                        // $memptr floating arithmetic carries the memory base in
+                        // operand 1; that operand is intentionally integer-class.
+                        if (ins.symbol == "$memptr" && input_index == 1U) {
+                            if (reg < function.register_classes.size() && function.register_classes[reg] != RegisterClass::integer)
+                                error(diagnostics, "floating memory operand has non-integer address register in @" + function.name);
+                            continue;
+                        }
                         if (reg < function.register_classes.size() && function.register_classes[reg] != RegisterClass::floating)
                             error(diagnostics, "floating opcode has non-floating input register in @" + function.name);
                     }

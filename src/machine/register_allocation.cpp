@@ -174,8 +174,14 @@ LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
 
                 std::vector<Instruction> stores;
                 std::vector<Instruction> loads;
+                struct DeferredRematerialization {
+                    VirtualRegister replacement{};
+                    Instruction instruction;
+                };
+                std::vector<DeferredRematerialization> deferred_rematerializations;
                 stores.reserve(selected.size());
                 loads.reserve(selected.size());
+                deferred_rematerializations.reserve(selected.size());
                 std::vector<std::pair<VirtualRegister, VirtualRegister>> replacements;
                 replacements.reserve(selected.size());
                 for (const auto reg : selected) {
@@ -195,9 +201,14 @@ LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
                     function.register_widths.push_back(width);
                     function.register_classes.push_back(register_class);
                     if (rematerializable != nullptr) {
+                        // Recreate constants immediately before their first real
+                        // post-call use instead of eagerly after the call. An
+                        // intervening call then does not make the fresh constant
+                        // artificially live across another clobber point, avoiding
+                        // chains of reloads that are overwritten before use.
                         auto reload = *rematerializable;
                         reload.result = replacement;
-                        loads.push_back(std::move(reload));
+                        deferred_rematerializations.push_back({replacement, std::move(reload)});
                         ++stats.transition_loads;
                         stats.transition_bytes += 8U;
                     } else {
@@ -222,6 +233,25 @@ LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
                 for (std::size_t later = rewrite_start; later < block.instructions.size(); ++later)
                     for (const auto& [from, to] : replacements)
                         rewrite_register(block.instructions[later], from, to);
+
+                const auto uses_register = [](const Instruction& instruction, VirtualRegister reg) {
+                    if (std::find(instruction.inputs.begin(), instruction.inputs.end(), reg) != instruction.inputs.end())
+                        return true;
+                    for (const auto& successor : instruction.successors)
+                        if (std::find(successor.arguments.begin(), successor.arguments.end(), reg) != successor.arguments.end())
+                            return true;
+                    return false;
+                };
+                for (auto& deferred : deferred_rematerializations) {
+                    const auto first_use = std::find_if(
+                        block.instructions.begin() + static_cast<std::ptrdiff_t>(rewrite_start),
+                        block.instructions.end(),
+                        [&](const Instruction& candidate) {
+                            return uses_register(candidate, deferred.replacement);
+                        });
+                    if (first_use != block.instructions.end())
+                        block.instructions.insert(first_use, std::move(deferred.instruction));
+                }
                 changed = true;
                 break;
             }
@@ -504,6 +534,34 @@ LiveRangeSplitStats split_live_ranges_around_calls(Function& function) {
         }
     }
 
+    // Splitting can move a rematerializable constant's entire use range past a
+    // call, leaving its original definition dead. The normal machine DCE has
+    // already run before call splitting, so remove only these trivially pure
+    // definitions here instead of carrying them into allocation/codegen.
+    std::vector<std::uint32_t> post_split_uses(function.register_count, 0U);
+    for (const auto& block : function.blocks) {
+        for (const auto& instruction : block.instructions) {
+            for (const auto input : instruction.inputs)
+                if (input < post_split_uses.size()) ++post_split_uses[input];
+            for (const auto& successor : instruction.successors)
+                for (const auto argument : successor.arguments)
+                    if (argument < post_split_uses.size()) ++post_split_uses[argument];
+        }
+    }
+    for (auto& block : function.blocks) {
+        block.instructions.erase(
+            std::remove_if(block.instructions.begin(), block.instructions.end(),
+                [&](const Instruction& instruction) {
+                    if (instruction.result >= post_split_uses.size() ||
+                        post_split_uses[instruction.result] != 0U) return false;
+                    return instruction.opcode == Opcode::load_immediate ||
+                           instruction.opcode == Opcode::load_immediate_i64 ||
+                           instruction.opcode == Opcode::load_immediate_f32 ||
+                           instruction.opcode == Opcode::load_immediate_f64;
+                }),
+            block.instructions.end());
+    }
+
     return stats;
 }
 
@@ -743,6 +801,14 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             if (supports_unary_reuse(instruction.opcode) && instruction.inputs.size() == 1 &&
                 instruction.result < function.register_count)
                 unary_sources[instruction.result] = instruction.inputs.front();
+            // x86 SELECT lowering initializes the destination with the false
+            // operand and then conditionally replaces it with CMOV.  Treat the
+            // false operand as a two-address affinity source so a dying false
+            // value can already occupy the result register and the initializer
+            // copy disappears.
+            if ((instruction.opcode == Opcode::select_i32 || instruction.opcode == Opcode::select_i64) &&
+                instruction.inputs.size() == 3U && instruction.result < function.register_count)
+                two_address_sources[instruction.result] = instruction.inputs[2];
             switch (instruction.opcode) {
             case Opcode::call_i32: case Opcode::call_i64: case Opcode::call_f32: case Opcode::call_f64: case Opcode::call_void: case Opcode::call_aggregate:
             case Opcode::call_indirect_i32: case Opcode::call_indirect_i64: case Opcode::call_indirect_f32:
@@ -831,6 +897,15 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     // signature rather than only zero-, one-, and two-argument functions.
     integer_physicals.insert(integer_physicals.begin() + 2, PhysicalRegister::r8d);
     integer_physicals.insert(integer_physicals.begin() + 3, PhysicalRegister::r9d);
+    // Leaf functions can also use the first two SysV integer argument registers
+    // as ordinary caller-saved temporaries. The encoder never reserves rdi/rsi
+    // as scratch registers, and entry arguments are already resolved as a
+    // cycle-safe parallel copy. Keep them out of call-containing functions for
+    // now so ABI argument placement remains maximally conservative.
+    if (call_positions.empty()) {
+        integer_physicals.insert(integer_physicals.begin() + 4, PhysicalRegister::edi);
+        integer_physicals.insert(integer_physicals.begin() + 5, PhysicalRegister::esi);
+    }
     constexpr std::array floating_physicals{FloatingPhysicalRegister::xmm2, FloatingPhysicalRegister::xmm3, FloatingPhysicalRegister::xmm4, FloatingPhysicalRegister::xmm5};
     std::vector<PhysicalRegister> free_integer(integer_physicals.begin(), integer_physicals.end());
     std::vector<FloatingPhysicalRegister> free_floating(floating_physicals.begin(), floating_physicals.end());
@@ -1351,6 +1426,88 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
                 definitions[instruction.result] = &instruction;
         }
     }
+
+    // A single-use floating constant is cheapest as a rematerialized value.
+    // Keeping it in an allocated XMM register first only adds a move at the
+    // consumer (especially an ABI call argument) while extending pressure.
+    // Multi-use constants remain allocated so loop-invariant values can still
+    // be materialized once and reused.
+    for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+        auto& location = allocation.locations[reg];
+        if (location.kind != LocationKind::floating_register || definitions[reg] == nullptr ||
+            allocation.intervals[reg].use_count != 1U) continue;
+        const auto opcode = definitions[reg]->opcode;
+        if (opcode != Opcode::load_immediate_f32 && opcode != Opcode::load_immediate_f64) continue;
+        location.kind = LocationKind::rematerialized_floating;
+        location.rematerialized_immediate = definitions[reg]->immediate;
+        if (allocation.physical_count != 0U) --allocation.physical_count;
+        ++allocation.rematerialized_value_count;
+        ++allocation.rematerialized_use_count;
+    }
+
+    // Single-use integer constants passed directly to a call are cheapest at
+    // the use site: the ABI setup can materialize the immediate straight into
+    // its destination register. Restrict this policy to call arguments so the
+    // allocator's general spill-weighting behavior remains independently testable.
+    std::vector<bool> single_use_call_argument(function.register_count, false);
+    for (const auto& block : function.blocks) {
+        for (const auto& instruction : block.instructions) {
+            if (!is_call_opcode(instruction.opcode)) continue;
+            std::size_t first_argument = 0U;
+            if (instruction.opcode == Opcode::call_aggregate ||
+                instruction.opcode == Opcode::call_indirect_i32 || instruction.opcode == Opcode::call_indirect_i64 ||
+                instruction.opcode == Opcode::call_indirect_f32 || instruction.opcode == Opcode::call_indirect_f64 ||
+                instruction.opcode == Opcode::call_indirect_void)
+                first_argument = 1U;
+            for (std::size_t index = first_argument; index < instruction.inputs.size(); ++index) {
+                const auto reg = instruction.inputs[index];
+                if (reg < single_use_call_argument.size()) single_use_call_argument[reg] = true;
+            }
+        }
+    }
+    for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+        auto& location = allocation.locations[reg];
+        if (!single_use_call_argument[reg] || location.kind != LocationKind::physical_register ||
+            definitions[reg] == nullptr || allocation.intervals[reg].use_count != 1U) continue;
+        const auto opcode = definitions[reg]->opcode;
+        if (opcode != Opcode::load_immediate && opcode != Opcode::load_immediate_i64) continue;
+        location.kind = LocationKind::rematerialized_integer;
+        location.rematerialized_immediate = definitions[reg]->immediate;
+        if (allocation.physical_count != 0U) --allocation.physical_count;
+        if (is_callee_saved(location.physical)) {
+            if (allocation.callee_saved_allocation_count != 0U) --allocation.callee_saved_allocation_count;
+        } else if (allocation.caller_saved_allocation_count != 0U) {
+            --allocation.caller_saved_allocation_count;
+        }
+        ++allocation.rematerialized_value_count;
+        ++allocation.rematerialized_use_count;
+    }
+
+    // Small integer constants that live across calls are usually cheaper to
+    // recreate at their uses than to occupy a callee-saved register for the
+    // whole interval. In particular, call arguments still require a move into
+    // the ABI register either way, so using an immediate there eliminates the
+    // constant's defining move plus the function-level push/pop pair.
+    for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
+        auto& location = allocation.locations[reg];
+        if (location.kind != LocationKind::physical_register ||
+            !is_callee_saved(location.physical) || definitions[reg] == nullptr ||
+            !crosses_call(allocation.intervals[reg])) continue;
+        const auto opcode = definitions[reg]->opcode;
+        if (opcode != Opcode::load_immediate && opcode != Opcode::load_immediate_i64) continue;
+        const auto immediate = definitions[reg]->immediate;
+        if (immediate < std::numeric_limits<std::int32_t>::min() ||
+            static_cast<std::uint64_t>(immediate) > std::numeric_limits<std::uint32_t>::max()) continue;
+        if (allocation.intervals[reg].use_count > 8U) continue;
+
+        location.kind = LocationKind::rematerialized_integer;
+        location.rematerialized_immediate = immediate;
+        if (allocation.physical_count != 0U) --allocation.physical_count;
+        if (allocation.callee_saved_allocation_count != 0U) --allocation.callee_saved_allocation_count;
+        ++allocation.rematerialized_value_count;
+        allocation.rematerialized_use_count += allocation.intervals[reg].use_count;
+    }
+
     for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
         auto& location = allocation.locations[reg];
         if (location.kind != LocationKind::stack_slot || definitions[reg] == nullptr ||
