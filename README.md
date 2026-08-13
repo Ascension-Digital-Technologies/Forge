@@ -4,7 +4,7 @@
 
 **A verified compiler infrastructure toolkit for building native language frontends.**
 
-[![Release](https://img.shields.io/badge/release-2.0.0-2563eb)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/release-2.0.12-2563eb)](CHANGELOG.md)
 [![C++](https://img.shields.io/badge/C%2B%2B-20-00599c)](CMakeLists.txt)
 [![License](https://img.shields.io/badge/license-Apache--2.0-16a34a)](LICENSE)
 [![C API](https://img.shields.io/badge/C%20API-v10-7c3aed)](include/forge-c/forge.h)
@@ -53,6 +53,44 @@ Machine IR · allocation · x86-64 encoding
 | **Native output** | System V and Windows x64 lowering, deterministic ELF64/COFF objects, static archives, shared-library linking |
 | **ABI tooling** | Aggregate classification, variadic/calling-convention metadata, register and stack usage summaries |
 | **Incremental builds** | Fingerprints, dependency invalidation, parallel scheduling, cached functions, object and executable caching |
+
+## Performance
+
+Forge is continuously compared against Clang/LLVM using both a 27-kernel optimization matrix and an integrated application-style workload. The current acceptance run was recorded on **August 12, 2026** with both compilers at `-O3` and AVX-512 enabled.
+
+### Integrated Forge vs LLVM workload
+
+The integrated workload combines packed memory transforms, shared/deep expression DAGs, a dynamic vectorized memory loop, reductions, state updates, dependent integer arithmetic, branches, call chains, recurrence loops, and floating-point work. Forge and LLVM must produce the same checksum before timing is accepted.
+
+| Metric | Forge | LLVM | Result |
+|---|---:|---:|---:|
+| Integrated runtime | **3.718 ms** | 8.925 ms | **Forge 2.40x faster** |
+| Median compile time | **36.779 ms** | 201.211 ms | **Forge 5.47x faster** |
+| Broad object `.text` | **2692 B** | 3709 B | **Forge 27.4% smaller** |
+
+The 27-kernel broad matrix has a **1.182x geometric-mean runtime advantage for Forge** in the current run. Forge's strongest cases remain packed expression chains and shared DAGs; LLVM still leads on several scalar register-pressure, call-liveness, and floating-recurrence workloads. The benchmark reports those losses rather than normalizing them away.
+
+Reproduce the complete comparison with:
+
+```sh
+python3 benchmarks/real-app/run.py --build build/release-strict --x86-vector avx512
+```
+
+### Dynamic loop vectorization
+
+Forge recognizes canonical countdown loops over contiguous i32/i64 memory, inserts a target-width vector loop, and preserves the original scalar loop as the exact tail. The current AVX-512 O3 benchmark produces fully EVEX-native hot loops and keeps `vzeroupper` at ABI boundaries rather than inside each vector iteration.
+
+| Elements | Forge AVX-512 vs scalar | Forge AVX-512 / LLVM |
+|---:|---:|---:|
+| 31 | 2.04x faster | 1.49x LLVM time |
+| 128 | 3.74x faster | 1.55x LLVM time |
+| 1,024 | **4.13x faster** | **0.82x LLVM time** |
+| 4,096 | **3.95x faster** | **0.82x LLVM time** |
+
+So Forge now beats LLVM on the larger AVX-512 loop cases while LLVM still wins on small trip counts where Forge's vector setup cost is not yet amortized. AVX2 improves Forge scalar execution by roughly 2.3x on larger loops but still trails LLVM's AVX2 code, making small-trip gating and further loop scheduling the next optimization targets.
+
+The production compiler now also avoids expensive per-pass whole-module verification unless explicitly using diagnostic tooling. Release compilation runs the optimization pipeline, verifies once at the optimized-IR boundary, then lowers to verified machine IR. Per-pass verification and timing remain available through `forge-opt`.
+
 
 ## Quick start
 
@@ -290,7 +328,7 @@ The alias analysis intentionally returns `may_alias` when provenance or offsets 
 
 ## Project status and boundaries
 
-Forge 2.0.0 is the stabilized production release of the compiler core, frontend SDK, native library workflows, optimizer, allocator, and x86-64 backend. The unified driver adds `forge inspect`, `forge explain`, and `forge doctor`; explicit native calling conventions support by-value aggregate parameters and register-classified aggregate returns, while ABI-indirect aggregates continue through hidden result buffers.
+Forge 2.0.12 is the stabilized production release of the compiler core, frontend SDK, native library workflows, optimizer, allocator, and x86-64 backend. The unified driver adds `forge inspect`, `forge explain`, and `forge doctor`; explicit native calling conventions support by-value aggregate parameters and register-classified aggregate returns, while ABI-indirect aggregates continue through hidden result buffers.
 
 The following are not currently part of the supported surface:
 

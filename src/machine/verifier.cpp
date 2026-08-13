@@ -12,7 +12,7 @@ void error(Diagnostics& out, std::string message) {
     out.push_back({DiagnosticSeverity::error, std::move(message), {}});
 }
 bool has_result(Opcode opcode) {
-    return opcode != Opcode::jump && opcode != Opcode::branch_i1 && opcode != Opcode::return_i32 && opcode != Opcode::return_i64 && opcode != Opcode::return_f32 && opcode != Opcode::return_f64 && opcode != Opcode::return_void && opcode != Opcode::return_aggregate && opcode != Opcode::call_void && opcode != Opcode::call_aggregate && opcode != Opcode::call_indirect_void && opcode != Opcode::store_stack_i8 && opcode != Opcode::store_stack_i16 && opcode != Opcode::store_stack_i32 && opcode != Opcode::store_stack_i64 && opcode != Opcode::store_stack_f32 && opcode != Opcode::store_stack_f64 && opcode != Opcode::store_ptr_i8 && opcode != Opcode::store_ptr_i16 && opcode != Opcode::store_ptr_i32 && opcode != Opcode::store_ptr_i64 && opcode != Opcode::store_ptr_f32 && opcode != Opcode::store_ptr_f64;
+    return opcode != Opcode::jump && opcode != Opcode::branch_i1 && opcode != Opcode::return_i32 && opcode != Opcode::return_i64 && opcode != Opcode::return_f32 && opcode != Opcode::return_f64 && opcode != Opcode::return_void && opcode != Opcode::return_aggregate && opcode != Opcode::call_void && opcode != Opcode::call_aggregate && opcode != Opcode::call_indirect_void && opcode != Opcode::store_stack_i8 && opcode != Opcode::store_stack_i16 && opcode != Opcode::store_stack_i32 && opcode != Opcode::store_stack_i64 && opcode != Opcode::store_stack_f32 && opcode != Opcode::store_stack_f64 && opcode != Opcode::store_ptr_i8 && opcode != Opcode::store_ptr_i16 && opcode != Opcode::store_ptr_i32 && opcode != Opcode::store_ptr_i64 && opcode != Opcode::store_ptr_f32 && opcode != Opcode::store_ptr_f64 && opcode != Opcode::add_i64_contiguous_inplace && opcode != Opcode::binary_i32_contiguous_inplace && opcode != Opcode::binary_i64_contiguous_inplace && opcode != Opcode::binary_i32_contiguous_map && opcode != Opcode::binary_i64_contiguous_map && opcode != Opcode::binary_i32_contiguous_map2 && opcode != Opcode::binary_i64_contiguous_map2 && opcode != Opcode::binary_i32_contiguous_map3 && opcode != Opcode::binary_i64_contiguous_map3 && opcode != Opcode::binary_i32_contiguous_chain && opcode != Opcode::binary_i64_contiguous_chain && opcode != Opcode::binary_i32_contiguous_dag && opcode != Opcode::binary_i64_contiguous_dag && opcode != Opcode::binary_i32_contiguous_dag_reuse && opcode != Opcode::binary_i64_contiguous_dag_reuse;
 }
 
 bool is_float_arithmetic(Opcode opcode) {
@@ -118,13 +118,30 @@ std::size_t expected_inputs(Opcode opcode) {
     case Opcode::load_ptr_i64:
     case Opcode::load_ptr_f32:
     case Opcode::load_ptr_f64:
-    case Opcode::ptr_offset: return 1;
+    case Opcode::ptr_offset:
+    case Opcode::reduce_add_i32_contiguous:
+    case Opcode::reduce_add_i64_contiguous: return 1;
     case Opcode::store_ptr_i8:
     case Opcode::store_ptr_i16:
     case Opcode::store_ptr_i32:
     case Opcode::store_ptr_i64:
     case Opcode::store_ptr_f32:
-    case Opcode::store_ptr_f64: return 2;
+    case Opcode::store_ptr_f64:
+    case Opcode::add_i64_contiguous_inplace:
+    case Opcode::binary_i32_contiguous_inplace:
+    case Opcode::binary_i64_contiguous_inplace: return 2;
+    case Opcode::binary_i32_contiguous_map:
+    case Opcode::binary_i64_contiguous_map:
+    case Opcode::binary_i32_contiguous_map2:
+    case Opcode::binary_i64_contiguous_map2: return 3;
+    case Opcode::binary_i32_contiguous_map3:
+    case Opcode::binary_i64_contiguous_map3: return 4;
+    case Opcode::binary_i32_contiguous_chain:
+    case Opcode::binary_i64_contiguous_chain:
+    case Opcode::binary_i32_contiguous_dag:
+    case Opcode::binary_i64_contiguous_dag:
+    case Opcode::binary_i32_contiguous_dag_reuse:
+    case Opcode::binary_i64_contiguous_dag_reuse: return static_cast<std::size_t>(-1);
     case Opcode::select_i32:
     case Opcode::select_i64: return 3;
     case Opcode::return_void: return 0;
@@ -202,6 +219,120 @@ Diagnostics verify_module(const Module& module) {
                     ins.opcode != Opcode::store_ptr_i32 && ins.opcode != Opcode::store_ptr_i64)
                     error(diagnostics, "immediate store on unsupported opcode in @" + function.name);
                 if (expected != static_cast<std::size_t>(-1) && ins.inputs.size() != expected) error(diagnostics, "wrong operand count for " + std::string(opcode_name(ins.opcode)) + " in @" + function.name);
+                if (ins.opcode == Opcode::binary_i32_contiguous_inplace || ins.opcode == Opcode::binary_i64_contiguous_inplace ||
+                    ins.opcode == Opcode::binary_i32_contiguous_map || ins.opcode == Opcode::binary_i64_contiguous_map ||
+                    ins.opcode == Opcode::binary_i32_contiguous_map2 || ins.opcode == Opcode::binary_i64_contiguous_map2 ||
+                    ins.opcode == Opcode::binary_i32_contiguous_map3 || ins.opcode == Opcode::binary_i64_contiguous_map3 ||
+                    ins.opcode == Opcode::binary_i32_contiguous_chain || ins.opcode == Opcode::binary_i64_contiguous_chain ||
+                    ins.opcode == Opcode::binary_i32_contiguous_dag || ins.opcode == Opcode::binary_i64_contiguous_dag ||
+                    ins.opcode == Opcode::binary_i32_contiguous_dag_reuse || ins.opcode == Opcode::binary_i64_contiguous_dag_reuse) {
+                    const bool wide = ins.opcode == Opcode::binary_i64_contiguous_inplace || ins.opcode == Opcode::binary_i64_contiguous_map ||
+                                      ins.opcode == Opcode::binary_i64_contiguous_map2 || ins.opcode == Opcode::binary_i64_contiguous_map3 || ins.opcode == Opcode::binary_i64_contiguous_chain || ins.opcode == Opcode::binary_i64_contiguous_dag || ins.opcode == Opcode::binary_i64_contiguous_dag_reuse;
+                    const bool chained = ins.opcode == Opcode::binary_i32_contiguous_map3 || ins.opcode == Opcode::binary_i64_contiguous_map3;
+                    const bool arbitrary_chain = ins.opcode == Opcode::binary_i32_contiguous_chain || ins.opcode == Opcode::binary_i64_contiguous_chain;
+                    const bool arbitrary_dag = ins.opcode == Opcode::binary_i32_contiguous_dag || ins.opcode == Opcode::binary_i64_contiguous_dag;
+                    const bool reusable_dag = ins.opcode == Opcode::binary_i32_contiguous_dag_reuse || ins.opcode == Opcode::binary_i64_contiguous_dag_reuse;
+                    if (ins.vector_mask_lanes != 0U) {
+                        const auto max_mask_lanes = static_cast<std::uint8_t>(wide ? 8U : 16U);
+                        if (ins.vector_bits != 512U || ins.vector_mask_lanes > max_mask_lanes)
+                            error(diagnostics, "packed AVX-512 lane mask requires a valid 512-bit pack in @" + function.name);
+                    }
+                    if (arbitrary_chain) {
+                        if (ins.symbol.size() < 6U || (ins.symbol.size() & 1U) != 0U)
+                            error(diagnostics, "packed integer chain must contain at least three encoded operations in @" + function.name);
+                        const auto operation_count = ins.symbol.size() / 2U;
+                        if (ins.inputs.size() != operation_count + 2U)
+                            error(diagnostics, "packed integer chain source/operation mismatch in @" + function.name);
+                        for (std::size_t offset = 0; offset + 1U < ins.symbol.size(); offset += 2U) {
+                            const auto encoded = static_cast<std::uint32_t>(static_cast<unsigned char>(ins.symbol[offset])) |
+                                                 (static_cast<std::uint32_t>(static_cast<unsigned char>(ins.symbol[offset + 1U])) << 8U);
+                            const auto operation = static_cast<Opcode>(encoded);
+                            const bool chain_supported = wide
+                                ? (operation == Opcode::add_i64 || operation == Opcode::sub_i64 || operation == Opcode::and_i64 || operation == Opcode::or_i64 || operation == Opcode::xor_i64)
+                                : (operation == Opcode::add_i32 || operation == Opcode::sub_i32 || operation == Opcode::and_i32 || operation == Opcode::or_i32 || operation == Opcode::xor_i32);
+                            if (!chain_supported) error(diagnostics, "unsupported packed integer chain operation in @" + function.name);
+                        }
+                    }
+                    if (arbitrary_dag) {
+                        if (ins.symbol.size() < 10U || (ins.symbol.size() & 1U) != 0U)
+                            error(diagnostics, "packed integer DAG must contain a valid postfix program in @" + function.name);
+                        std::size_t stack_depth = 0U;
+                        std::size_t max_stack_depth = 0U;
+                        std::size_t max_source = 0U;
+                        bool saw_source = false;
+                        for (std::size_t offset = 0; offset + 1U < ins.symbol.size(); offset += 2U) {
+                            const auto token = static_cast<std::uint32_t>(static_cast<unsigned char>(ins.symbol[offset])) |
+                                               (static_cast<std::uint32_t>(static_cast<unsigned char>(ins.symbol[offset + 1U])) << 8U);
+                            if ((token & 0x8000U) != 0U) {
+                                ++stack_depth;
+                                max_stack_depth = std::max(max_stack_depth, stack_depth);
+                                max_source = std::max(max_source, static_cast<std::size_t>(token & 0x7fffU));
+                                saw_source = true;
+                                continue;
+                            }
+                            const auto operation = static_cast<Opcode>(token);
+                            const bool supported = wide
+                                ? (operation == Opcode::add_i64 || operation == Opcode::sub_i64 || operation == Opcode::and_i64 || operation == Opcode::or_i64 || operation == Opcode::xor_i64)
+                                : (operation == Opcode::add_i32 || operation == Opcode::sub_i32 || operation == Opcode::and_i32 || operation == Opcode::or_i32 || operation == Opcode::xor_i32);
+                            if (!supported) error(diagnostics, "unsupported packed integer DAG operation in @" + function.name);
+                            if (stack_depth < 2U) error(diagnostics, "packed integer DAG postfix stack underflow in @" + function.name);
+                            else --stack_depth;
+                        }
+                        if (stack_depth != 1U) error(diagnostics, "packed integer DAG postfix stack must end at depth one in @" + function.name);
+                        if (max_stack_depth > 8U) error(diagnostics, "packed integer DAG exceeds x86 vector evaluation depth in @" + function.name);
+                        const auto source_count = saw_source ? max_source + 1U : 0U;
+                        if (source_count == 0U || ins.inputs.size() != source_count + 1U)
+                            error(diagnostics, "packed integer DAG source/program mismatch in @" + function.name);
+                    }
+                    if (reusable_dag) {
+                        if (ins.symbol.size() < 18U || (ins.symbol.size() % 6U) != 0U)
+                            error(diagnostics, "packed reusable integer DAG must contain fixed-size node records in @" + function.name);
+                        const auto node_count = ins.symbol.size() / 6U;
+                        std::size_t max_source = 0U;
+                        bool saw_source = false;
+                        for (std::size_t node = 0; node < node_count; ++node) {
+                            const auto read16 = [&](std::size_t at) -> std::uint16_t {
+                                return static_cast<std::uint16_t>(static_cast<unsigned char>(ins.symbol[at])) |
+                                       (static_cast<std::uint16_t>(static_cast<unsigned char>(ins.symbol[at + 1U])) << 8U);
+                            };
+                            const auto tag = read16(node * 6U);
+                            const auto lhs = read16(node * 6U + 2U);
+                            const auto rhs = read16(node * 6U + 4U);
+                            if ((tag & 0x8000U) != 0U) {
+                                saw_source = true;
+                                max_source = std::max(max_source, static_cast<std::size_t>(tag & 0x7fffU));
+                                continue;
+                            }
+                            const auto operation = static_cast<Opcode>(tag);
+                            const bool supported = wide
+                                ? (operation == Opcode::add_i64 || operation == Opcode::sub_i64 || operation == Opcode::and_i64 || operation == Opcode::or_i64 || operation == Opcode::xor_i64)
+                                : (operation == Opcode::add_i32 || operation == Opcode::sub_i32 || operation == Opcode::and_i32 || operation == Opcode::or_i32 || operation == Opcode::xor_i32);
+                            if (!supported) error(diagnostics, "unsupported packed reusable DAG operation in @" + function.name);
+                            if (lhs >= node || rhs >= node) error(diagnostics, "packed reusable DAG node must reference earlier nodes in @" + function.name);
+                        }
+                        const auto source_count = saw_source ? max_source + 1U : 0U;
+                        if (source_count == 0U || ins.inputs.size() != source_count + 1U)
+                            error(diagnostics, "packed reusable DAG source/program mismatch in @" + function.name);
+                    }
+                    const auto packed_opcode = static_cast<Opcode>(chained ? (ins.argument_index & 0xffffU) : ins.argument_index);
+                    const auto packed_opcode2 = static_cast<Opcode>((ins.argument_index >> 16U) & 0xffffU);
+                    if (!arbitrary_chain && !arbitrary_dag && !reusable_dag) {
+                        const bool supported = wide
+                            ? (packed_opcode == Opcode::add_i64 || packed_opcode == Opcode::sub_i64 || packed_opcode == Opcode::and_i64 ||
+                               packed_opcode == Opcode::or_i64 || packed_opcode == Opcode::xor_i64)
+                            : (packed_opcode == Opcode::add_i32 || packed_opcode == Opcode::sub_i32 || packed_opcode == Opcode::and_i32 ||
+                               packed_opcode == Opcode::or_i32 || packed_opcode == Opcode::xor_i32);
+                        if (!supported) error(diagnostics, "unsupported packed integer operation in @" + function.name);
+                    }
+                    if (chained) {
+                        const bool supported2 = wide
+                            ? (packed_opcode2 == Opcode::add_i64 || packed_opcode2 == Opcode::sub_i64 || packed_opcode2 == Opcode::and_i64 || packed_opcode2 == Opcode::or_i64 || packed_opcode2 == Opcode::xor_i64)
+                            : (packed_opcode2 == Opcode::add_i32 || packed_opcode2 == Opcode::sub_i32 || packed_opcode2 == Opcode::and_i32 || packed_opcode2 == Opcode::or_i32 || packed_opcode2 == Opcode::xor_i32);
+                        if (!supported2) error(diagnostics, "unsupported second packed integer operation in @" + function.name);
+                    }
+                    if (ins.immediate < 2 || ins.immediate > 8 || (ins.immediate & (ins.immediate - 1)) != 0)
+                        error(diagnostics, "invalid packed integer lane count in @" + function.name);
+                }
                 for (auto reg : ins.inputs) if (reg >= function.register_count) error(diagnostics, "input virtual register out of range in @" + function.name);
                 if ((ins.opcode == Opcode::call_i32 || ins.opcode == Opcode::call_i64 || ins.opcode == Opcode::call_f32 || ins.opcode == Opcode::call_f64 || ins.opcode == Opcode::call_void || ins.opcode == Opcode::call_aggregate || ins.opcode == Opcode::load_function_address || ins.opcode == Opcode::load_global_address) && ins.symbol.empty()) error(diagnostics, "call has empty target in @" + function.name);
                 if ((ins.opcode == Opcode::call_indirect_i32 || ins.opcode == Opcode::call_indirect_i64 || ins.opcode == Opcode::call_indirect_f32 || ins.opcode == Opcode::call_indirect_f64 || ins.opcode == Opcode::call_indirect_void) && ins.inputs.empty()) error(diagnostics, "indirect call has no target in @" + function.name);

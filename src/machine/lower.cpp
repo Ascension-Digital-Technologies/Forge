@@ -152,7 +152,7 @@ unsigned integer_width(ir::Type type) {
 }
 }
 
-LowerResult lower_module(const ir::Module& source) {
+LowerResult lower_module(const ir::Module& source, const LowerOptions& options) {
     LowerResult result;
     Module output;
     output.name = source.name();
@@ -1112,7 +1112,7 @@ LowerResult lower_module(const ir::Module& source) {
     }
 
     if (result.diagnostics.empty()) {
-        (void)optimize_module(output);
+        (void)optimize_module(output, options.slp_cost_model);
         auto machine_diagnostics = verify_module(output);
         if (machine_diagnostics.empty()) result.module = std::move(output);
         else result.diagnostics = std::move(machine_diagnostics);

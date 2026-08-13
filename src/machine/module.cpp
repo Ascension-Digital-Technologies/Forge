@@ -66,6 +66,23 @@ const char* opcode_name(Opcode opcode) noexcept {
     case Opcode::or_i64: return "or_i64";
     case Opcode::xor_i32: return "xor_i32";
     case Opcode::xor_i64: return "xor_i64";
+    case Opcode::reduce_add_i32_contiguous: return "reduce_add_i32_contiguous";
+    case Opcode::reduce_add_i64_contiguous: return "reduce_add_i64_contiguous";
+    case Opcode::add_i64_contiguous_inplace: return "add_i64_contiguous_inplace";
+    case Opcode::binary_i32_contiguous_inplace: return "binary_i32_contiguous_inplace";
+    case Opcode::binary_i64_contiguous_inplace: return "binary_i64_contiguous_inplace";
+    case Opcode::binary_i32_contiguous_map: return "binary_i32_contiguous_map";
+    case Opcode::binary_i64_contiguous_map: return "binary_i64_contiguous_map";
+    case Opcode::binary_i32_contiguous_map2: return "binary_i32_contiguous_map2";
+    case Opcode::binary_i64_contiguous_map2: return "binary_i64_contiguous_map2";
+    case Opcode::binary_i32_contiguous_map3: return "binary_i32_contiguous_map3";
+    case Opcode::binary_i64_contiguous_map3: return "binary_i64_contiguous_map3";
+    case Opcode::binary_i32_contiguous_chain: return "binary_i32_contiguous_chain";
+    case Opcode::binary_i64_contiguous_chain: return "binary_i64_contiguous_chain";
+    case Opcode::binary_i32_contiguous_dag: return "binary_i32_contiguous_dag";
+    case Opcode::binary_i64_contiguous_dag: return "binary_i64_contiguous_dag";
+    case Opcode::binary_i32_contiguous_dag_reuse: return "binary_i32_contiguous_dag_reuse";
+    case Opcode::binary_i64_contiguous_dag_reuse: return "binary_i64_contiguous_dag_reuse";
     case Opcode::select_i32: return "select_i32";
     case Opcode::select_i64: return "select_i64";
     case Opcode::shl_i32: return "shl_i32";
@@ -217,6 +234,21 @@ std::string print_module(const Module& module) {
                                         instruction.opcode != Opcode::store_ptr_i64 &&
                                         instruction.opcode != Opcode::store_ptr_f32 &&
                                         instruction.opcode != Opcode::store_ptr_f64 &&
+                                        instruction.opcode != Opcode::add_i64_contiguous_inplace &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_inplace &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_inplace &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_map &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_map &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_map2 &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_map2 &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_map3 &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_map3 &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_chain &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_chain &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_dag &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_dag &&
+                                        instruction.opcode != Opcode::binary_i32_contiguous_dag_reuse &&
+                                        instruction.opcode != Opcode::binary_i64_contiguous_dag_reuse &&
                                         instruction.opcode != Opcode::jump &&
                                         instruction.opcode != Opcode::branch_i1;
                 if (has_result) out << 'v' << instruction.result << " = ";
@@ -225,6 +257,7 @@ std::string print_module(const Module& module) {
             if (instruction.opcode == Opcode::load_argument || instruction.opcode == Opcode::load_argument_i64 || instruction.opcode == Opcode::load_argument_f32 || instruction.opcode == Opcode::load_argument_f64) out << ' ' << instruction.argument_index;
                 else if (instruction.opcode == Opcode::load_immediate || instruction.opcode == Opcode::load_immediate_i64 || instruction.opcode == Opcode::load_immediate_f32 || instruction.opcode == Opcode::load_immediate_f64 || instruction.opcode == Opcode::load_stack_i8 || instruction.opcode == Opcode::load_stack_i16 || instruction.opcode == Opcode::load_stack_i32 || instruction.opcode == Opcode::load_stack_i64 || instruction.opcode == Opcode::load_stack_f32 || instruction.opcode == Opcode::load_stack_f64) out << ' ' << instruction.immediate;
                 else if (instruction.opcode == Opcode::ptr_offset) out << " v" << instruction.inputs[0] << ", " << instruction.immediate;
+                else if ((instruction.opcode == Opcode::load_ptr_i64 || instruction.opcode == Opcode::load_ptr_i32 || instruction.opcode == Opcode::load_ptr_f64 || instruction.opcode == Opcode::load_ptr_f32) && !instruction.inputs.empty()) out << " v" << instruction.inputs[0] << " + " << instruction.immediate;
                 else if (instruction.opcode == Opcode::store_stack_i8 || instruction.opcode == Opcode::store_stack_i16 || instruction.opcode == Opcode::store_stack_i32 || instruction.opcode == Opcode::store_stack_i64 || instruction.opcode == Opcode::store_stack_f32 || instruction.opcode == Opcode::store_stack_f64) {
                     if (instruction.symbol == "$storeimm") out << " " << static_cast<std::int32_t>(instruction.argument_index) << ", " << instruction.immediate;
                     else out << " v" << instruction.inputs[0] << ", " << instruction.immediate;
@@ -232,6 +265,54 @@ std::string print_module(const Module& module) {
                 else if (instruction.opcode == Opcode::store_ptr_i8 || instruction.opcode == Opcode::store_ptr_i16 || instruction.opcode == Opcode::store_ptr_i32 || instruction.opcode == Opcode::store_ptr_i64 || instruction.opcode == Opcode::store_ptr_f32 || instruction.opcode == Opcode::store_ptr_f64) {
                     if (instruction.symbol == "$storeimm") out << " " << static_cast<std::int32_t>(instruction.argument_index) << ", v" << instruction.inputs[0];
                     else out << " v" << instruction.inputs[0] << ", v" << instruction.inputs[1];
+                }
+                else if (instruction.opcode == Opcode::binary_i32_contiguous_inplace ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_inplace ||
+                         instruction.opcode == Opcode::binary_i32_contiguous_map ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_map ||
+                         instruction.opcode == Opcode::binary_i32_contiguous_map2 ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_map2) {
+                    out << " [" << opcode_name(static_cast<Opcode>(instruction.argument_index))
+                        << ", lanes=" << instruction.immediate << "]";
+                    for (const auto input : instruction.inputs) out << " v" << input;
+                }
+                else if (instruction.opcode == Opcode::binary_i32_contiguous_map3 ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_map3) {
+                    const auto op1 = static_cast<Opcode>(instruction.argument_index & 0xffffU);
+                    const auto op2 = static_cast<Opcode>((instruction.argument_index >> 16U) & 0xffffU);
+                    out << " [" << opcode_name(op1) << " -> " << opcode_name(op2)
+                        << ", lanes=" << instruction.immediate << "]";
+                    for (const auto input : instruction.inputs) out << " v" << input;
+                }
+                else if (instruction.opcode == Opcode::binary_i32_contiguous_chain ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_chain) {
+                    out << " [";
+                    for (std::size_t offset = 0; offset + 1U < instruction.symbol.size(); offset += 2U) {
+                        if (offset != 0U) out << " -> ";
+                        const auto encoded = static_cast<std::uint32_t>(static_cast<unsigned char>(instruction.symbol[offset])) |
+                                             (static_cast<std::uint32_t>(static_cast<unsigned char>(instruction.symbol[offset + 1U])) << 8U);
+                        out << opcode_name(static_cast<Opcode>(encoded));
+                    }
+                    out << ", lanes=" << instruction.immediate << "]";
+                    for (const auto input : instruction.inputs) out << " v" << input;
+                }
+                else if (instruction.opcode == Opcode::binary_i32_contiguous_dag_reuse ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_dag_reuse) {
+                    out << " [reuse-dag nodes=" << (instruction.symbol.size() / 6U)
+                        << ", lanes=" << instruction.immediate << "]";
+                    for (const auto input : instruction.inputs) out << " v" << input;
+                }
+                else if (instruction.opcode == Opcode::binary_i32_contiguous_dag ||
+                         instruction.opcode == Opcode::binary_i64_contiguous_dag) {
+                    out << " [postfix:";
+                    for (std::size_t offset = 0; offset + 1U < instruction.symbol.size(); offset += 2U) {
+                        const auto token = static_cast<std::uint32_t>(static_cast<unsigned char>(instruction.symbol[offset])) |
+                                           (static_cast<std::uint32_t>(static_cast<unsigned char>(instruction.symbol[offset + 1U])) << 8U);
+                        if ((token & 0x8000U) != 0U) out << " s" << (token & 0x7fffU);
+                        else out << ' ' << opcode_name(static_cast<Opcode>(token));
+                    }
+                    out << ", lanes=" << instruction.immediate << "]";
+                    for (const auto input : instruction.inputs) out << " v" << input;
                 }
                 else if (instruction.opcode == Opcode::jump) {
                     out << ' ';
@@ -247,6 +328,7 @@ std::string print_module(const Module& module) {
                     for (const auto input : instruction.inputs) out << " v" << input;
                     if (instruction.symbol == "$imm") out << ", " << instruction.immediate;
                     else if (instruction.symbol == "$memstack") out << ", [stack " << instruction.immediate << "]";
+                    else if (instruction.symbol == "$memptr") out << ", [v" << instruction.inputs.back() << " + " << instruction.immediate << "]";
                 }
                 out << '\n';
             }

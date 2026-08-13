@@ -37,7 +37,17 @@ PassRunReport PassManager::run_with_report(ir::Module& module, bool verify_each)
 }
 
 PassResult PassManager::run(ir::Module& module, bool verify_each) const {
-    return run_with_report(module, verify_each).total;
+    PassResult total;
+    for (auto& function : module.functions()) {
+        analysis::FunctionAnalysisManager analyses(function);
+        for (const auto& pass : passes_) {
+            auto result = pass->run(function, analyses);
+            total += result;
+            if (result.changed) analyses.invalidate_all();
+            if (verify_each) verify_or_throw(module, pass->name());
+        }
+    }
+    return total;
 }
 
 std::vector<std::string> PassManager::pass_names() const {

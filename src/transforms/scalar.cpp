@@ -573,12 +573,22 @@ pass::PassResult MemoryForwardingPass::run(ir::Function& function,
         erase_may_aliases(state, value.location);
         state.push_back(std::move(value));
     };
+    // Dataflow convergence must use identity of the abstract state, not the
+    // alias relation.  In particular, two identical imprecise/unknown memory
+    // locations intentionally answer may_alias, so using must_alias here makes
+    // an unchanged loop state appear different forever.
+    const auto same_location = [](const analysis::MemoryLocation& left,
+                                  const analysis::MemoryLocation& right) {
+        return left.origin == right.origin && left.base == right.base &&
+               left.offset == right.offset && left.size == right.size &&
+               left.precise == right.precise;
+    };
     const auto same_state = [&](const MemoryState& left, const MemoryState& right) {
         if (left.size() != right.size()) return false;
         return std::all_of(left.begin(), left.end(), [&](const AvailableMemoryValue& item) {
             return std::any_of(right.begin(), right.end(), [&](const AvailableMemoryValue& other) {
                 return item.type == other.type && item.value == other.value &&
-                       aliases.alias(item.location, other.location) == analysis::AliasResult::must_alias;
+                       same_location(item.location, other.location);
             });
         });
     };
@@ -731,10 +741,22 @@ pass::PassResult DeadStoreEliminationPass::run(
                                   const analysis::MemoryLocation& candidate) {
         if (!contains_must_alias(locations, candidate)) locations.push_back(candidate);
     };
+    // As above in memory forwarding, convergence compares the abstract
+    // locations themselves.  AliasAnalysis may conservatively return
+    // may_alias for an identical imprecise location, which is not evidence
+    // that the dataflow state changed.
+    const auto same_location = [](const analysis::MemoryLocation& left,
+                                  const analysis::MemoryLocation& right) {
+        return left.origin == right.origin && left.base == right.base &&
+               left.offset == right.offset && left.size == right.size &&
+               left.precise == right.precise;
+    };
     const auto same_set = [&](const LocationSet& left, const LocationSet& right) {
         if (left.size() != right.size()) return false;
         return std::all_of(left.begin(), left.end(), [&](const analysis::MemoryLocation& location) {
-            return contains_must_alias(right, location);
+            return std::any_of(right.begin(), right.end(), [&](const analysis::MemoryLocation& other) {
+                return same_location(location, other);
+            });
         });
     };
     const auto intersect_successors = [&](const std::string& block_name,

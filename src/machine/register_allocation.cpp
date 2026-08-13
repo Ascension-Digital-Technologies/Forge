@@ -723,7 +723,7 @@ bool segments_overlap(const LiveInterval& left, const LiveInterval& right) {
 }
 } // namespace
 
-RegisterAllocation allocate_linear_scan(const Function& function) {
+RegisterAllocation allocate_linear_scan(const Function& function, target::NativeAbi abi) {
     RegisterAllocation allocation;
     if (function.register_count > 16384U) {
         allocation.diagnostics.push_back({DiagnosticSeverity::error,
@@ -897,12 +897,12 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     // signature rather than only zero-, one-, and two-argument functions.
     integer_physicals.insert(integer_physicals.begin() + 2, PhysicalRegister::r8d);
     integer_physicals.insert(integer_physicals.begin() + 3, PhysicalRegister::r9d);
-    // Leaf functions can also use the first two SysV integer argument registers
-    // as ordinary caller-saved temporaries. The encoder never reserves rdi/rsi
-    // as scratch registers, and entry arguments are already resolved as a
-    // cycle-safe parallel copy. Keep them out of call-containing functions for
-    // now so ABI argument placement remains maximally conservative.
-    if (call_positions.empty()) {
+    // Leaf functions on SysV can also use rdi/rsi as ordinary caller-saved
+    // temporaries. Do NOT add them to the Windows x64 pool: rdi/rsi are
+    // nonvolatile there and must be preserved by the callee. Keeping this pool
+    // host-ABI aware prevents leaf JIT code from silently corrupting the native
+    // caller state on Windows.
+    if (abi == target::NativeAbi::system_v_x86_64 && call_positions.empty()) {
         integer_physicals.insert(integer_physicals.begin() + 4, PhysicalRegister::edi);
         integer_physicals.insert(integer_physicals.begin() + 5, PhysicalRegister::esi);
     }
@@ -911,7 +911,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     std::vector<FloatingPhysicalRegister> free_floating(floating_physicals.begin(), floating_physicals.end());
     const auto take_integer_register = [&](bool across_call) -> std::optional<PhysicalRegister> {
         const auto preferred = std::find_if(free_integer.begin(), free_integer.end(), [&](PhysicalRegister reg) {
-            return across_call ? is_callee_saved(reg) : is_call_clobbered(reg);
+            return across_call ? is_callee_saved(reg, abi) : is_call_clobbered(reg, abi);
         });
         if (preferred != free_integer.end()) {
             const auto physical = *preferred;
@@ -925,7 +925,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         return physical;
     };
     const auto record_integer_allocation = [&](PhysicalRegister physical) {
-        if (is_callee_saved(physical)) ++allocation.callee_saved_allocation_count;
+        if (is_callee_saved(physical, abi)) ++allocation.callee_saved_allocation_count;
         else ++allocation.caller_saved_allocation_count;
     };
     auto spill = [&](VirtualRegister reg) {
@@ -1024,7 +1024,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
                     return active.interval.virtual_register == source && active.interval.end == interval.start;
                 });
             if (source_active != integer_active.end() &&
-                (!crosses_call(interval) || is_callee_saved(source_active->physical))) {
+                (!crosses_call(interval) || is_callee_saved(source_active->physical, abi))) {
                 const auto physical = source_active->physical;
                 integer_active.erase(source_active);
                 allocation.locations[interval.virtual_register] = {
@@ -1054,8 +1054,8 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         } else {
             auto candidate = std::min_element(integer_active.begin(), integer_active.end(),
                 [&](const IntegerActive& left, const IntegerActive& right) {
-                    const bool left_eligible = !interval_crosses_call || is_callee_saved(left.physical);
-                    const bool right_eligible = !interval_crosses_call || is_callee_saved(right.physical);
+                    const bool left_eligible = !interval_crosses_call || is_callee_saved(left.physical, abi);
+                    const bool right_eligible = !interval_crosses_call || is_callee_saved(right.physical, abi);
                     if (left_eligible != right_eligible) return left_eligible;
                     const auto left_priority = spill_priority(left.interval);
                     const auto right_priority = spill_priority(right.interval);
@@ -1063,7 +1063,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
                     return left.interval.end > right.interval.end;
                 });
             if (candidate != integer_active.end() &&
-                (!interval_crosses_call || is_callee_saved(candidate->physical)) &&
+                (!interval_crosses_call || is_callee_saved(candidate->physical, abi)) &&
                 should_spill_active(*candidate, interval)) {
                 const auto physical = candidate->physical;
                 spill(candidate->interval.virtual_register);
@@ -1128,7 +1128,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             }
         } else {
             for (const auto physical : integer_physicals) {
-                if (crosses_call(allocation.intervals[reg]) && !is_callee_saved(physical)) continue;
+                if (crosses_call(allocation.intervals[reg]) && !is_callee_saved(physical, abi)) continue;
                 if (!integer_available(reg, physical)) continue;
                 allocation.locations[reg] = {LocationKind::physical_register, physical, FloatingPhysicalRegister::xmm2, 0};
                 record_integer_allocation(physical);
@@ -1177,7 +1177,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             if (arithmetic_source < function.register_count) ++allocation.two_address_reuse_count;
             else ++allocation.unary_reuse_count;
         } else if (!floating && source_location.kind == LocationKind::physical_register &&
-                   (!crosses_call(allocation.intervals[destination]) || is_callee_saved(source_location.physical))) {
+                   (!crosses_call(allocation.intervals[destination]) || is_callee_saved(source_location.physical, abi))) {
             // A loop induction update commonly has three consecutive virtual
             // values that should occupy one physical register: the body
             // parameter, the arithmetic result, and the successor header
@@ -1382,7 +1382,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             coalesced = true;
         } else if (!floating && source_location.kind == LocationKind::physical_register &&
                    (!crosses_call(allocation.intervals[destination]) ||
-                    is_callee_saved(source_location.physical)) &&
+                    is_callee_saved(source_location.physical, abi)) &&
                    integer_available_except(destination, source_location.physical, source)) {
             destination_location = {LocationKind::physical_register, source_location.physical,
                                     FloatingPhysicalRegister::xmm2, 0};
@@ -1400,7 +1400,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
             coalesced = true;
         } else if (!floating && destination_location.kind == LocationKind::physical_register &&
                    (!crosses_call(allocation.intervals[source]) ||
-                    is_callee_saved(destination_location.physical)) &&
+                    is_callee_saved(destination_location.physical, abi)) &&
                    integer_available_except(source, destination_location.physical, destination)) {
             source_location = {LocationKind::physical_register, destination_location.physical,
                                FloatingPhysicalRegister::xmm2, 0};
@@ -1474,7 +1474,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
         location.kind = LocationKind::rematerialized_integer;
         location.rematerialized_immediate = definitions[reg]->immediate;
         if (allocation.physical_count != 0U) --allocation.physical_count;
-        if (is_callee_saved(location.physical)) {
+        if (is_callee_saved(location.physical, abi)) {
             if (allocation.callee_saved_allocation_count != 0U) --allocation.callee_saved_allocation_count;
         } else if (allocation.caller_saved_allocation_count != 0U) {
             --allocation.caller_saved_allocation_count;
@@ -1491,7 +1491,7 @@ RegisterAllocation allocate_linear_scan(const Function& function) {
     for (VirtualRegister reg = 0; reg < function.register_count; ++reg) {
         auto& location = allocation.locations[reg];
         if (location.kind != LocationKind::physical_register ||
-            !is_callee_saved(location.physical) || definitions[reg] == nullptr ||
+            !is_callee_saved(location.physical, abi) || definitions[reg] == nullptr ||
             !crosses_call(allocation.intervals[reg])) continue;
         const auto opcode = definitions[reg]->opcode;
         if (opcode != Opcode::load_immediate && opcode != Opcode::load_immediate_i64) continue;
@@ -1580,6 +1580,10 @@ StackAllocation allocate_stack_slots(const Function& function) {
     }
     allocation.frame_size = align_frame(function.local_stack_size + static_cast<std::uint32_t>(function.register_count) * 8U);
     return allocation;
+}
+
+RegisterAllocation allocate_linear_scan(const Function& function) {
+    return allocate_linear_scan(function, host_register_abi());
 }
 
 } // namespace forge::machine

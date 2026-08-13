@@ -17,8 +17,8 @@ try {
 
     $ForgeExe = Join-Path $BuildDir "forge.exe"
     $Version = (& $ForgeExe version).Trim()
-    if ($Version -ne "forge 2.0.0") {
-        throw "Expected forge 2.0.0, got '$Version'"
+    if ($Version -ne "forge 2.0.12") {
+        throw "Expected forge 2.0.12, got '$Version'"
     }
 
     cpack --config (Join-Path $BuildDir "CPackConfig.cmake") -B $PackageDir
@@ -26,7 +26,7 @@ try {
 
     $ChecksumPath = Join-Path $PackageDir "SHA256SUMS"
     Get-ChildItem $PackageDir -File |
-        Where-Object { $_.Name -like "forge-2.0.0-*" } |
+        Where-Object { $_.Name -like "forge-2.0.12-*" } |
         Sort-Object Name |
         ForEach-Object {
             $Hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

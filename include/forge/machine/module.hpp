@@ -71,6 +71,23 @@ enum class Opcode : std::uint8_t {
     or_i64,
     xor_i32,
     xor_i64,
+    reduce_add_i32_contiguous,
+    reduce_add_i64_contiguous,
+    add_i64_contiguous_inplace,
+    binary_i32_contiguous_inplace,
+    binary_i64_contiguous_inplace,
+    binary_i32_contiguous_map,
+    binary_i64_contiguous_map,
+    binary_i32_contiguous_map2,
+    binary_i64_contiguous_map2,
+    binary_i32_contiguous_map3,
+    binary_i64_contiguous_map3,
+    binary_i32_contiguous_chain,
+    binary_i64_contiguous_chain,
+    binary_i32_contiguous_dag,
+    binary_i64_contiguous_dag,
+    binary_i32_contiguous_dag_reuse,
+    binary_i64_contiguous_dag_reuse,
     select_i32,
     select_i64,
     shl_i32,
@@ -164,6 +181,10 @@ struct Instruction {
     std::uint32_t argument_index{};
     std::string symbol;
     std::vector<Successor> successors;
+    // Selected packed-vector width for target-aware machine pseudos. Zero means scalar/default.
+    std::uint16_t vector_bits{};
+    // Optional active-lane count for AVX-512 opmask emission. Zero means unmasked.
+    std::uint8_t vector_mask_lanes{};
 };
 
 struct Block {

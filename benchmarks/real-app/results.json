@@ -1,0 +1,28 @@
+{
+  "target": "avx512",
+  "optimization": "O3",
+  "integrated_workload": {
+    "samples": 15,
+    "rounds": 32,
+    "checksum": "db6c484d95ce84e7",
+    "forge_avg_ms": 3.718479,
+    "llvm_avg_ms": 8.925403,
+    "forge_over_llvm": 0.416618,
+    "forge_speedup": 2.400283
+  },
+  "compile_time": {
+    "samples": 7,
+    "forge_median_ms": 36.77943300044717,
+    "llvm_median_ms": 201.21074200051225,
+    "forge_over_llvm": 0.18279060369626557,
+    "forge_speedup": 5.470740726157087
+  },
+  "broad_matrix": {
+    "kernels": 27,
+    "sample_pairs": 9,
+    "geometric_mean_forge_over_llvm": 0.8460710294347782,
+    "geometric_mean_forge_speedup": 1.181933862772792,
+    "forge_text_bytes": 2692,
+    "llvm_text_bytes": 3709
+  }
+}

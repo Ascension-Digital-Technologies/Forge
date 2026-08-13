@@ -1,0 +1,5 @@
+checksum db6c484d95ce84e7
+forge_avg_ms 3.827086
+llvm_avg_ms 9.115542
+forge_over_llvm 0.419842
+speedup_if_forge_wins 2.381849

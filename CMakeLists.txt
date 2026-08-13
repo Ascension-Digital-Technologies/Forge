@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 project(Forge
- VERSION 2.0.0
+ VERSION 2.0.12
  DESCRIPTION "Verified deterministic compiler core and x86-64 backend"
  LANGUAGES CXX)
 option(FORGE_BUILD_TESTS "Build Forge tests" ON)
@@ -303,7 +303,7 @@ forge_add_test(forge-incremental-object-tests tests/object/incremental_object_te
  add_test(NAME forge-driver-compile-coff COMMAND forge-cli compile ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir --format=coff -o ${CMAKE_CURRENT_BINARY_DIR}/forge-driver-test.obj)
  set_tests_properties(forge-driver-compile-coff PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  emitted COFF AMD64 object")
  add_test(NAME forge-driver-version COMMAND forge-cli version)
- set_tests_properties(forge-driver-version PROPERTIES PASS_REGULAR_EXPRESSION "forge 2.0.0")
+ set_tests_properties(forge-driver-version PROPERTIES PASS_REGULAR_EXPRESSION "forge 2.0.12")
  add_test(NAME forge-driver-doctor COMMAND forge-cli doctor)
  set_tests_properties(forge-driver-doctor PROPERTIES PASS_REGULAR_EXPRESSION "FORGE  doctor passed")
  add_test(NAME forge-driver-inspect COMMAND forge-cli inspect ${CMAKE_CURRENT_SOURCE_DIR}/examples/native-i64.fir --stage=all)

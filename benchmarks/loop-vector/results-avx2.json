@@ -1,0 +1,36 @@
+{
+  "31": {
+    "vector_ns": 15.118,
+    "scalar_ns": 27.826,
+    "llvm_ns": 7.299,
+    "scalar_over_vector": 1.844,
+    "vector_over_llvm": 2.015
+  },
+  "128": {
+    "vector_ns": 47.176,
+    "scalar_ns": 107.926,
+    "llvm_ns": 20.02,
+    "scalar_over_vector": 2.276,
+    "vector_over_llvm": 2.364
+  },
+  "1024": {
+    "vector_ns": 366.404,
+    "scalar_ns": 845.208,
+    "llvm_ns": 175.669,
+    "scalar_over_vector": 2.308,
+    "vector_over_llvm": 2.086
+  },
+  "4096": {
+    "vector_ns": 1430.189,
+    "scalar_ns": 3375.595,
+    "llvm_ns": 706.09,
+    "scalar_over_vector": 2.348,
+    "vector_over_llvm": 2.028
+  },
+  "_metadata": {
+    "target": "avx2",
+    "samples": 5,
+    "forge_ir_optimization": "O3",
+    "llvm_optimization": "O3"
+  }
+}

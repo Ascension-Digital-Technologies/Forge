@@ -52,7 +52,7 @@ void usage() {
               << "  explain <file.fir> [-O0|-O1|-O2|-O3|-Os|-Oz] explain optimization decisions\n"
               << "  doctor                  check the local Forge toolchain\n"
               << "  opt <file.fir> [-O0|-O1|-O2|-O3|-Os|-Oz] optimize and print Forge IR\n"
-              << "  compile <file.fir> [-O0|-O1|-O2|-O3|-Os|-Oz] [--pass-stats] [--format=auto|elf|coff] -o <file> emit x86-64 object\n"
+              << "  compile <file.fir> [-O0|-O1|-O2|-O3|-Os|-Oz] [--pass-stats] [--x86-vector=sse2|sse41|avx|avx2|avx512] [--format=auto|elf|coff] -o <file> emit x86-64 object\n"
               << "  archive create -o <library> <objects...> create a deterministic static library\n"
               << "  link-shared [-o <library>] [--linker=<driver>] <objects...> link a native shared library\n"
               << "  new-language <name> [directory] scaffold a Forge frontend project\n"
@@ -333,11 +333,21 @@ int main(int argc, char** argv) {
         std::string output_path;
         auto level = forge::pass::OptimizationLevel::o2;
         bool pass_stats = false;
+        auto vector_isa = forge::machine::X86VectorIsa::sse2;
         for (int index = 3; index < argc; ++index) {
             const std::string_view argument = argv[index];
             if (argument == "-o" && index + 1 < argc) output_path = argv[++index];
             else if (argument.rfind("--format=", 0) == 0) format = argument.substr(9);
             else if (argument == "--pass-stats") pass_stats = true;
+            else if (argument.rfind("--x86-vector=", 0) == 0) {
+                const auto value = argument.substr(13);
+                if (value == "sse2") vector_isa = forge::machine::X86VectorIsa::sse2;
+                else if (value == "sse41") vector_isa = forge::machine::X86VectorIsa::sse41;
+                else if (value == "avx") vector_isa = forge::machine::X86VectorIsa::avx;
+                else if (value == "avx2") vector_isa = forge::machine::X86VectorIsa::avx2;
+                else if (value == "avx512") vector_isa = forge::machine::X86VectorIsa::avx512;
+                else { std::cerr << "error: expected --x86-vector=sse2, sse41, avx, avx2, or avx512\n"; return 2; }
+            }
             else if (const auto parsed_level = forge::pass::parse_optimization_level(argument)) level = *parsed_level;
             else { std::cerr << "error: unknown compile option " << argument << '\n'; return 2; }
         }
@@ -354,19 +364,35 @@ int main(int argc, char** argv) {
         forge::pass::PassManager pipeline;
         forge::pass::build_standard_pipeline(pipeline, level);
         try {
-            const auto report = pipeline.run_with_report(*module);
             if (pass_stats) {
+                const auto report = pipeline.run_with_report(*module, false);
                 std::cerr << "FORGE  pipeline -" << forge::pass::optimization_level_name(level)
                           << " passes=" << pipeline.pass_names().size()
                           << " rewritten=" << report.total.operations_rewritten
                           << " removed=" << report.total.operations_removed
                           << " blocks=" << report.total.blocks_removed << '\n';
+            } else {
+                (void)pipeline.run(*module, false);
+            }
+            // Production compilation validates once at the optimized-IR
+            // boundary.  Per-pass verification remains available through
+            // forge-opt and other diagnostic paths, but paying for a complete
+            // module verification after every release pass dominated compile
+            // time on realistic source sets.
+            const auto optimized_diagnostics = forge::ir::verify_module(*module);
+            for (const auto& diagnostic : optimized_diagnostics) {
+                if (diagnostic.severity == forge::DiagnosticSeverity::error) {
+                    print_diagnostics(optimized_diagnostics);
+                    return 1;
+                }
             }
         } catch (const std::exception& error) {
             std::cerr << "error: " << error.what() << '\n';
             return 1;
         }
-        auto lowered = forge::machine::lower_module(*module);
+        forge::machine::LowerOptions lower_options;
+        lower_options.slp_cost_model = forge::machine::SlpCostModel::x86_64(vector_isa);
+        auto lowered = forge::machine::lower_module(*module, lower_options);
         if (!lowered.ok()) { print_diagnostics(lowered.diagnostics); return 1; }
         std::vector<std::byte> bytes;
         std::string_view label;

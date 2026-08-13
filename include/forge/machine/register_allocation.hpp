@@ -8,6 +8,7 @@
 
 #include "forge/diagnostics/diagnostic.hpp"
 #include "forge/machine/module.hpp"
+#include "forge/target/abi.hpp"
 
 namespace forge::machine {
 
@@ -25,15 +26,38 @@ enum class PhysicalRegister : std::uint8_t {
     r15d,
 };
 
-[[nodiscard]] constexpr bool is_call_clobbered(PhysicalRegister reg) noexcept {
+[[nodiscard]] constexpr bool is_call_clobbered(PhysicalRegister reg, target::NativeAbi abi) noexcept {
+    if (abi == target::NativeAbi::windows_x64)
+        return reg == PhysicalRegister::r8d || reg == PhysicalRegister::r9d ||
+               reg == PhysicalRegister::r10d || reg == PhysicalRegister::r11d;
     return reg == PhysicalRegister::edi || reg == PhysicalRegister::esi ||
            reg == PhysicalRegister::r8d || reg == PhysicalRegister::r9d ||
            reg == PhysicalRegister::r10d || reg == PhysicalRegister::r11d;
 }
 
-[[nodiscard]] constexpr bool is_callee_saved(PhysicalRegister reg) noexcept {
+[[nodiscard]] constexpr bool is_callee_saved(PhysicalRegister reg, target::NativeAbi abi) noexcept {
+    if (abi == target::NativeAbi::windows_x64)
+        return reg == PhysicalRegister::edi || reg == PhysicalRegister::esi || reg == PhysicalRegister::ebx ||
+               reg == PhysicalRegister::r12d || reg == PhysicalRegister::r13d ||
+               reg == PhysicalRegister::r14d || reg == PhysicalRegister::r15d;
     return reg == PhysicalRegister::ebx || reg == PhysicalRegister::r12d || reg == PhysicalRegister::r13d ||
            reg == PhysicalRegister::r14d || reg == PhysicalRegister::r15d;
+}
+
+[[nodiscard]] constexpr target::NativeAbi host_register_abi() noexcept {
+#if defined(_WIN32)
+    return target::NativeAbi::windows_x64;
+#else
+    return target::NativeAbi::system_v_x86_64;
+#endif
+}
+
+[[nodiscard]] constexpr bool is_call_clobbered(PhysicalRegister reg) noexcept {
+    return is_call_clobbered(reg, host_register_abi());
+}
+
+[[nodiscard]] constexpr bool is_callee_saved(PhysicalRegister reg) noexcept {
+    return is_callee_saved(reg, host_register_abi());
 }
 
 enum class FloatingPhysicalRegister : std::uint8_t {
@@ -131,6 +155,7 @@ struct StackAllocation {
 
 [[nodiscard]] LiveRangeSplitStats split_live_ranges_around_calls(Function& function);
 [[nodiscard]] std::vector<LiveInterval> compute_live_intervals(const Function& function);
+[[nodiscard]] RegisterAllocation allocate_linear_scan(const Function& function, target::NativeAbi abi);
 [[nodiscard]] RegisterAllocation allocate_linear_scan(const Function& function);
 [[nodiscard]] StackAllocation allocate_stack_slots(const Function& function);
 

@@ -95,6 +95,40 @@ entry:
         const auto memory_result = forge::interpreter::execute(*memory.module, "forward", {});
         require(memory_result.value.has_value() && memory_result.value->signed_value() == 20, "memory forwarding changed semantics");
 
+        // Regression: imprecise loop-carried pointer locations must not keep
+        // memory dataflow fixed-point iteration alive forever.  AliasAnalysis
+        // intentionally reports may_alias for these locations; convergence is
+        // based on abstract-state identity instead.
+        constexpr auto memory_loop_source = R"(module @memory_loop_convergence {
+func @touch(%base: ptr, %count: i64, %delta: i64) -> void {
+entry:
+  %zero = const i64 0
+  %one = const i64 1
+  jump loop(%base, %count)
+loop(%p: ptr, %n: i64):
+  %done = cmp.eq i64 %n %zero
+  branch %done, exit(), body(%p, %n)
+body(%q: ptr, %m: i64):
+  %value = load i64 %q align 8
+  %next_value = add i64 %value %delta
+  store i64 %next_value %q align 8
+  %next_p = ptr.offset ptr %q 8
+  %next_n = sub i64 %m %one
+  jump loop(%next_p, %next_n)
+exit:
+  return
+}
+})";
+        auto memory_loop = forge::ir::parse_module(memory_loop_source);
+        require(memory_loop.ok(), "memory-loop convergence fixture failed to parse");
+        forge::pass::PassManager memory_loop_pipeline;
+        memory_loop_pipeline.add<forge::transforms::MemoryForwardingPass>()
+                            .add<forge::transforms::DeadStoreEliminationPass>();
+        (void)memory_loop_pipeline.run(*memory_loop.module);
+        for (const auto& diagnostic : forge::ir::verify_module(*memory_loop.module))
+            require(diagnostic.severity != forge::DiagnosticSeverity::error,
+                    "memory-loop dataflow convergence produced invalid IR");
+
         constexpr auto global_load_source = R"(module @global_load_forward {
 func @straight() -> i64 {
 entry:

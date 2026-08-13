@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -137,6 +138,188 @@ public:
         const auto function = reinterpret_cast<Function>(engine_->lookup(name));
         require(function != nullptr, "missing f64 comparison JIT entry");
         compare(name, expected, function(left, right));
+    }
+
+    void compare_void_ptr_i64(std::string_view name, std::span<const std::uint64_t> initial,
+                              std::uint64_t delta) const {
+        std::vector<std::uint64_t> expected(initial.begin(), initial.end());
+        std::vector<std::uint64_t> actual(initial.begin(), initial.end());
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(expected.data(), expected.size() * sizeof(std::uint64_t), false),
+            forge::interpreter::Value::integer(forge::ir::Type(forge::ir::TypeKind::i64), delta)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter map-add execution failed"); }
+        using Function = void (*)(std::uint64_t*, std::uint64_t);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing pointer/i64 void JIT entry");
+        function(actual.data(), delta);
+        require(expected == actual, "packed map-add JIT result disagrees with interpreter");
+    }
+
+    void compare_void_ptr_i32(std::string_view name, std::span<const std::uint32_t> initial,
+                              std::uint32_t scalar) const {
+        std::vector<std::uint32_t> expected(initial.begin(), initial.end());
+        std::vector<std::uint32_t> actual(initial.begin(), initial.end());
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(expected.data(), expected.size() * sizeof(std::uint32_t), false),
+            forge::interpreter::Value::integer(forge::ir::Type(forge::ir::TypeKind::i32), scalar)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter packed i32 execution failed"); }
+        using Function = void (*)(std::uint32_t*, std::uint32_t);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing pointer/i32 void JIT entry");
+        function(actual.data(), scalar);
+        require(expected == actual, "packed i32 expression JIT result disagrees with interpreter");
+    }
+
+    void compare_void_ptr_ptr_i32(std::string_view name, std::span<const std::uint32_t> source,
+                                  std::uint32_t scalar) const {
+        std::vector<std::uint32_t> expected_source(source.begin(), source.end());
+        std::vector<std::uint32_t> actual_source(source.begin(), source.end());
+        std::vector<std::uint32_t> expected_destination(source.size(), 0xdeadbeefU);
+        std::vector<std::uint32_t> actual_destination(source.size(), 0xdeadbeefU);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(expected_source.data(), expected_source.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(expected_destination.data(), expected_destination.size() * sizeof(std::uint32_t), false),
+            forge::interpreter::Value::integer(forge::ir::Type(forge::ir::TypeKind::i32), scalar)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter packed copy-map execution failed"); }
+        using Function = void (*)(const std::uint32_t*, std::uint32_t*, std::uint32_t);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing pointer/pointer/i32 void JIT entry");
+        function(actual_source.data(), actual_destination.data(), scalar);
+        require(expected_destination == actual_destination, "packed copy-map JIT result disagrees with interpreter");
+        require(actual_source == expected_source, "packed copy-map unexpectedly mutated its source");
+    }
+
+    void compare_void_ptr_ptr_ptr_i32(std::string_view name,
+                                      std::span<const std::uint32_t> lhs,
+                                      std::span<const std::uint32_t> rhs) const {
+        require(lhs.size() == rhs.size(), "vector map input sizes differ");
+        std::vector<std::uint32_t> expected_lhs(lhs.begin(), lhs.end());
+        std::vector<std::uint32_t> expected_rhs(rhs.begin(), rhs.end());
+        std::vector<std::uint32_t> actual_lhs(lhs.begin(), lhs.end());
+        std::vector<std::uint32_t> actual_rhs(rhs.begin(), rhs.end());
+        std::vector<std::uint32_t> expected_destination(lhs.size(), 0xdeadbeefU);
+        std::vector<std::uint32_t> actual_destination(lhs.size(), 0xdeadbeefU);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(expected_lhs.data(), expected_lhs.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(expected_rhs.data(), expected_rhs.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(expected_destination.data(), expected_destination.size() * sizeof(std::uint32_t), false)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter vector-to-vector map execution failed"); }
+        using Function = void (*)(const std::uint32_t*, const std::uint32_t*, std::uint32_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing pointer/pointer/pointer void JIT entry");
+        function(actual_lhs.data(), actual_rhs.data(), actual_destination.data());
+        require(expected_destination == actual_destination, "vector-to-vector map JIT result disagrees with interpreter");
+        require(actual_lhs == expected_lhs && actual_rhs == expected_rhs, "vector-to-vector map unexpectedly mutated a source");
+    }
+
+    void compare_void_ptr_ptr_ptr_ptr_i32(std::string_view name,
+                                          std::span<const std::uint32_t> a,
+                                          std::span<const std::uint32_t> b,
+                                          std::span<const std::uint32_t> c) const {
+        require(a.size() == b.size() && a.size() == c.size(), "chained vector map input sizes differ");
+        std::vector<std::uint32_t> ea(a.begin(), a.end()), eb(b.begin(), b.end()), ec(c.begin(), c.end());
+        std::vector<std::uint32_t> aa(a.begin(), a.end()), ab(b.begin(), b.end()), ac(c.begin(), c.end());
+        std::vector<std::uint32_t> ed(a.size(), 0xdeadbeefU), ad(a.size(), 0xdeadbeefU);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(ea.data(), ea.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(eb.data(), eb.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(ec.data(), ec.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(ed.data(), ed.size() * sizeof(std::uint32_t), false)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter chained vector map execution failed"); }
+        using Function = void (*)(const std::uint32_t*, const std::uint32_t*, const std::uint32_t*, std::uint32_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing chained vector map JIT entry");
+        function(aa.data(), ab.data(), ac.data(), ad.data());
+        require(ed == ad, "chained vector map JIT result disagrees with interpreter");
+        require(aa == ea && ab == eb && ac == ec, "chained vector map unexpectedly mutated a source");
+    }
+
+    void compare_void_five_sources_i32(std::string_view name,
+                                       std::span<const std::uint32_t> a,
+                                       std::span<const std::uint32_t> b,
+                                       std::span<const std::uint32_t> c,
+                                       std::span<const std::uint32_t> d,
+                                       std::span<const std::uint32_t> e) const {
+        require(a.size() == b.size() && a.size() == c.size() && a.size() == d.size() && a.size() == e.size(),
+                "deep chained vector map input sizes differ");
+        std::vector<std::uint32_t> ea(a.begin(), a.end()), eb(b.begin(), b.end()), ec(c.begin(), c.end()), ed(d.begin(), d.end()), ee(e.begin(), e.end());
+        std::vector<std::uint32_t> aa(a.begin(), a.end()), ab(b.begin(), b.end()), ac(c.begin(), c.end()), ad(d.begin(), d.end()), ae(e.begin(), e.end());
+        std::vector<std::uint32_t> expected_destination(a.size(), 0xdeadbeefU), actual_destination(a.size(), 0xdeadbeefU);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(ea.data(), ea.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(eb.data(), eb.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(ec.data(), ec.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(ed.data(), ed.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(ee.data(), ee.size() * sizeof(std::uint32_t), true),
+            forge::interpreter::Value::host_pointer(expected_destination.data(), expected_destination.size() * sizeof(std::uint32_t), false)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter deep chained vector map execution failed"); }
+        using Function = void (*)(const std::uint32_t*, const std::uint32_t*, const std::uint32_t*, const std::uint32_t*, const std::uint32_t*, std::uint32_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing deep chained vector map JIT entry");
+        function(aa.data(), ab.data(), ac.data(), ad.data(), ae.data(), actual_destination.data());
+        require(expected_destination == actual_destination, "deep chained vector map JIT result disagrees with interpreter");
+        require(aa == ea && ab == eb && ac == ec && ad == ed && ae == ee, "deep chained vector map unexpectedly mutated a source");
+    }
+
+    void compare_void_ptr_ptr_ptr_ptr_i64(std::string_view name,
+                                          std::span<const std::uint64_t> a,
+                                          std::span<const std::uint64_t> b,
+                                          std::span<const std::uint64_t> c) const {
+        require(a.size() == b.size() && a.size() == c.size(), "wide chained vector map input sizes differ");
+        std::vector<std::uint64_t> ea(a.begin(), a.end()), eb(b.begin(), b.end()), ec(c.begin(), c.end());
+        std::vector<std::uint64_t> aa(a.begin(), a.end()), ab(b.begin(), b.end()), ac(c.begin(), c.end());
+        std::vector<std::uint64_t> ed(a.size(), 0xdeadbeefdeadbeefULL), ad(a.size(), 0xdeadbeefdeadbeefULL);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(ea.data(), ea.size() * sizeof(std::uint64_t), true),
+            forge::interpreter::Value::host_pointer(eb.data(), eb.size() * sizeof(std::uint64_t), true),
+            forge::interpreter::Value::host_pointer(ec.data(), ec.size() * sizeof(std::uint64_t), true),
+            forge::interpreter::Value::host_pointer(ed.data(), ed.size() * sizeof(std::uint64_t), false)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter wide chained vector map execution failed"); }
+        using Function = void (*)(const std::uint64_t*, const std::uint64_t*, const std::uint64_t*, std::uint64_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing wide chained vector map JIT entry");
+        function(aa.data(), ab.data(), ac.data(), ad.data());
+        require(ed == ad, "wide chained vector map JIT result disagrees with interpreter");
+        require(aa == ea && ab == eb && ac == ec, "wide chained vector map unexpectedly mutated a source");
+    }
+
+    void compare_void_ptr_ptr_ptr_i64(std::string_view name,
+                                      std::span<const std::uint64_t> lhs,
+                                      std::span<const std::uint64_t> rhs) const {
+        require(lhs.size() == rhs.size(), "wide vector map input sizes differ");
+        std::vector<std::uint64_t> expected_lhs(lhs.begin(), lhs.end()), expected_rhs(rhs.begin(), rhs.end());
+        std::vector<std::uint64_t> actual_lhs(lhs.begin(), lhs.end()), actual_rhs(rhs.begin(), rhs.end());
+        std::vector<std::uint64_t> expected_destination(lhs.size(), 0xdeadbeefdeadbeefULL);
+        std::vector<std::uint64_t> actual_destination(lhs.size(), 0xdeadbeefdeadbeefULL);
+        const std::array arguments{
+            forge::interpreter::Value::host_pointer(expected_lhs.data(), expected_lhs.size() * sizeof(std::uint64_t), true),
+            forge::interpreter::Value::host_pointer(expected_rhs.data(), expected_rhs.size() * sizeof(std::uint64_t), true),
+            forge::interpreter::Value::host_pointer(expected_destination.data(), expected_destination.size() * sizeof(std::uint64_t), false)};
+        auto result = forge::interpreter::execute(module_, name, arguments);
+        if (!result.diagnostics.empty()) { print_diagnostics(result.diagnostics); fail("interpreter wide vector-to-vector map execution failed"); }
+        using Function = void (*)(const std::uint64_t*, const std::uint64_t*, std::uint64_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing wide pointer/pointer/pointer void JIT entry");
+        function(actual_lhs.data(), actual_rhs.data(), actual_destination.data());
+        require(expected_destination == actual_destination, "wide vector-to-vector map JIT result disagrees with interpreter");
+        require(actual_lhs == expected_lhs && actual_rhs == expected_rhs, "wide vector-to-vector map unexpectedly mutated a source");
+    }
+
+    void compare_i32_ptr(std::string_view name, std::span<const std::uint32_t> values) const {
+        const std::array arguments{forge::interpreter::Value::host_pointer(
+            const_cast<std::uint32_t*>(values.data()), values.size_bytes(), true)};
+        const auto expected = interpret(name, forge::ir::TypeKind::i32, arguments);
+        using Function = std::uint32_t (*)(const std::uint32_t*);
+        const auto function = reinterpret_cast<Function>(engine_->lookup(name));
+        require(function != nullptr, "missing pointer-to-i32 JIT entry");
+        compare(name, expected, function(values.data()));
     }
 
     void compare_i32_2(std::string_view name, std::int32_t left, std::int32_t right) const {
@@ -1209,6 +1392,619 @@ entry:
         dynamic_callback_table_fixture.compare_i64_2("dispatch", value, 0);
         dynamic_callback_table_fixture.compare_i64_2("dispatch", value, 1);
     }
+
+    constexpr auto slp_map_module = R"(module @slp_map_runtime {
+func @add4(%base: ptr, %delta: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %r0 = add i64 %v0 %delta
+  %r1 = add i64 %v1 %delta
+  %r2 = add i64 %v2 %delta
+  %r3 = add i64 %v3 %delta
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  return
+}
+})";
+    DifferentialModule slp_map_fixture(slp_map_module);
+    const std::array<std::uint64_t, 4> slp_map_small{1U, 2U, 3U, 4U};
+    const std::array<std::uint64_t, 4> slp_map_wrap{0xfffffffffffffff0ULL, 7ULL, 0x8000000000000000ULL, 99ULL};
+    slp_map_fixture.compare_void_ptr_i64("add4", slp_map_small, 5U);
+    slp_map_fixture.compare_void_ptr_i64("add4", slp_map_wrap, 0x20U);
+
+    constexpr auto slp_expression_pack_module = R"(module @slp_expression_pack_runtime {
+func @xor4_i32(%base: ptr, %mask: i32) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 4
+  %p2 = ptr.offset ptr %base 8
+  %p3 = ptr.offset ptr %base 12
+  %v0 = load i32 %base
+  %v1 = load i32 %p1
+  %v2 = load i32 %p2
+  %v3 = load i32 %p3
+  %r0 = xor i32 %v0 %mask
+  %r1 = xor i32 %v1 %mask
+  %r2 = xor i32 %v2 %mask
+  %r3 = xor i32 %v3 %mask
+  store i32 %r0 %base
+  store i32 %r1 %p1
+  store i32 %r2 %p2
+  store i32 %r3 %p3
+  return
+}
+func @and4_i64(%base: ptr, %mask: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %r0 = and i64 %v0 %mask
+  %r1 = and i64 %v1 %mask
+  %r2 = and i64 %v2 %mask
+  %r3 = and i64 %v3 %mask
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  return
+}
+func @sub4_i64(%base: ptr, %delta: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %r0 = sub i64 %v0 %delta
+  %r1 = sub i64 %v1 %delta
+  %r2 = sub i64 %v2 %delta
+  %r3 = sub i64 %v3 %delta
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  return
+}
+})";
+    DifferentialModule slp_expression_pack_fixture(slp_expression_pack_module);
+    const std::array<std::uint32_t, 4> slp_xor_values{0U, 0xffffffffU, 0x80000000U, 0x12345678U};
+    slp_expression_pack_fixture.compare_void_ptr_i32("xor4_i32", slp_xor_values, 0xa5a55a5aU);
+    const std::array<std::uint64_t, 4> slp_and_values{0ULL, 0xffffffffffffffffULL, 0x8000000000000000ULL, 0x123456789abcdef0ULL};
+    slp_expression_pack_fixture.compare_void_ptr_i64("and4_i64", slp_and_values, 0x00ff00ff00ff00ffULL);
+    slp_expression_pack_fixture.compare_void_ptr_i64("sub4_i64", slp_and_values, 0x1020304050607080ULL);
+
+
+    constexpr auto slp_i32_two_lane_module = R"(module @slp_i32_two_lane_runtime {
+func @xor2_i32(%base: ptr, %mask: i32) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 4
+  %v0 = load i32 %base
+  %v1 = load i32 %p1
+  %r0 = xor i32 %v0 %mask
+  %r1 = xor i32 %v1 %mask
+  store i32 %r0 %base
+  store i32 %r1 %p1
+  return
+}
+})";
+    DifferentialModule slp_i32_two_lane_fixture(slp_i32_two_lane_module);
+    const std::array<std::uint32_t, 4> slp_i32_two_lane_canary{0x11223344U, 0x55667788U, 0xa5a5a5a5U, 0x5a5a5a5aU};
+    slp_i32_two_lane_fixture.compare_void_ptr_i32("xor2_i32", slp_i32_two_lane_canary, 0x0f0ff0f0U);
+
+    constexpr auto slp_copy_map_module = R"(module @slp_copy_map_runtime {
+func @xor_copy4_i32(%src: ptr, %dst: ptr, %mask: i32) -> void {
+entry:
+  %s1 = ptr.offset ptr %src 4
+  %s2 = ptr.offset ptr %src 8
+  %s3 = ptr.offset ptr %src 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %v0 = load i32 %src
+  %v1 = load i32 %s1
+  %v2 = load i32 %s2
+  %v3 = load i32 %s3
+  %r0 = xor i32 %v0 %mask
+  %r1 = xor i32 %v1 %mask
+  %r2 = xor i32 %v2 %mask
+  %r3 = xor i32 %v3 %mask
+  store i32 %r0 %dst
+  store i32 %r1 %d1
+  store i32 %r2 %d2
+  store i32 %r3 %d3
+  return
+}
+})";
+    DifferentialModule slp_copy_map_fixture(slp_copy_map_module);
+    slp_copy_map_fixture.compare_void_ptr_ptr_i32("xor_copy4_i32", slp_xor_values, 0x0f0ff0f0U);
+
+    constexpr auto slp_vector_map_module = R"(module @slp_vector_map_runtime {
+func @add4_i32(%lhs: ptr, %rhs: ptr, %dst: ptr) -> void {
+entry:
+  %l1 = ptr.offset ptr %lhs 4
+  %l2 = ptr.offset ptr %lhs 8
+  %l3 = ptr.offset ptr %lhs 12
+  %r1 = ptr.offset ptr %rhs 4
+  %r2 = ptr.offset ptr %rhs 8
+  %r3 = ptr.offset ptr %rhs 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %a0 = load i32 %lhs
+  %a1 = load i32 %l1
+  %a2 = load i32 %l2
+  %a3 = load i32 %l3
+  %b0 = load i32 %rhs
+  %b1 = load i32 %r1
+  %b2 = load i32 %r2
+  %b3 = load i32 %r3
+  %v0 = add i32 %a0 %b0
+  %v1 = add i32 %a1 %b1
+  %v2 = add i32 %a2 %b2
+  %v3 = add i32 %a3 %b3
+  store i32 %v0 %dst
+  store i32 %v1 %d1
+  store i32 %v2 %d2
+  store i32 %v3 %d3
+  return
+}
+})";
+    DifferentialModule slp_vector_map_fixture(slp_vector_map_module);
+    const std::array<std::uint32_t, 4> slp_vector_rhs{7U, 0x80000000U, 0xffffffffU, 0x76543210U};
+    slp_vector_map_fixture.compare_void_ptr_ptr_ptr_i32("add4_i32", slp_xor_values, slp_vector_rhs);
+
+    constexpr auto slp_vector_sub_module = R"(module @slp_vector_sub_runtime {
+func @sub4_i64(%lhs: ptr, %rhs: ptr, %dst: ptr) -> void {
+entry:
+  %l1 = ptr.offset ptr %lhs 8
+  %l2 = ptr.offset ptr %lhs 16
+  %l3 = ptr.offset ptr %lhs 24
+  %r1 = ptr.offset ptr %rhs 8
+  %r2 = ptr.offset ptr %rhs 16
+  %r3 = ptr.offset ptr %rhs 24
+  %d1 = ptr.offset ptr %dst 8
+  %d2 = ptr.offset ptr %dst 16
+  %d3 = ptr.offset ptr %dst 24
+  %a0 = load i64 %lhs
+  %a1 = load i64 %l1
+  %a2 = load i64 %l2
+  %a3 = load i64 %l3
+  %b0 = load i64 %rhs
+  %b1 = load i64 %r1
+  %b2 = load i64 %r2
+  %b3 = load i64 %r3
+  %v0 = sub i64 %a0 %b0
+  %v1 = sub i64 %a1 %b1
+  %v2 = sub i64 %a2 %b2
+  %v3 = sub i64 %a3 %b3
+  store i64 %v0 %dst
+  store i64 %v1 %d1
+  store i64 %v2 %d2
+  store i64 %v3 %d3
+  return
+}
+})";
+    DifferentialModule slp_vector_sub_fixture(slp_vector_sub_module);
+    const std::array<std::uint64_t, 4> slp_vector_lhs64{0ULL, 1ULL, 0x8000000000000000ULL, 0xffffffffffffffffULL};
+    const std::array<std::uint64_t, 4> slp_vector_rhs64{1ULL, 3ULL, 0xffffffffffffffffULL, 0x123456789abcdef0ULL};
+    slp_vector_sub_fixture.compare_void_ptr_ptr_ptr_i64("sub4_i64", slp_vector_lhs64, slp_vector_rhs64);
+
+    constexpr auto slp_chained_module = R"(module @slp_chained_runtime {
+func @chain4_i32(%a: ptr, %b: ptr, %c: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %a2 = ptr.offset ptr %a 8
+  %a3 = ptr.offset ptr %a 12
+  %b1 = ptr.offset ptr %b 4
+  %b2 = ptr.offset ptr %b 8
+  %b3 = ptr.offset ptr %b 12
+  %c1 = ptr.offset ptr %c 4
+  %c2 = ptr.offset ptr %c 8
+  %c3 = ptr.offset ptr %c 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %av2 = load i32 %a2
+  %av3 = load i32 %a3
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %bv2 = load i32 %b2
+  %bv3 = load i32 %b3
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %cv2 = load i32 %c2
+  %cv3 = load i32 %c3
+  %x0 = xor i32 %av0 %bv0
+  %x1 = xor i32 %av1 %bv1
+  %x2 = xor i32 %av2 %bv2
+  %x3 = xor i32 %av3 %bv3
+  %v0 = add i32 %x0 %cv0
+  %v1 = add i32 %x1 %cv1
+  %v2 = add i32 %x2 %cv2
+  %v3 = add i32 %x3 %cv3
+  store i32 %v0 %dst
+  store i32 %v1 %d1
+  store i32 %v2 %d2
+  store i32 %v3 %d3
+  return
+}
+})";
+    DifferentialModule slp_chained_fixture(slp_chained_module);
+    const std::array<std::uint32_t, 4> chain_a{0U, 1U, 0xffffffffU, 0x80000000U};
+    const std::array<std::uint32_t, 4> chain_b{0xffffffffU, 3U, 0x12345678U, 0x7fffffffU};
+    const std::array<std::uint32_t, 4> chain_c{1U, 0xffffffffU, 0xeeeeeeeeU, 0x80000000U};
+    slp_chained_fixture.compare_void_ptr_ptr_ptr_ptr_i32("chain4_i32", chain_a, chain_b, chain_c);
+
+    constexpr auto slp_chained_i64_module = R"(module @slp_chained_i64_runtime {
+func @chain4_i64(%a: ptr, %b: ptr, %c: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 8
+  %a2 = ptr.offset ptr %a 16
+  %a3 = ptr.offset ptr %a 24
+  %b1 = ptr.offset ptr %b 8
+  %b2 = ptr.offset ptr %b 16
+  %b3 = ptr.offset ptr %b 24
+  %c1 = ptr.offset ptr %c 8
+  %c2 = ptr.offset ptr %c 16
+  %c3 = ptr.offset ptr %c 24
+  %d1 = ptr.offset ptr %dst 8
+  %d2 = ptr.offset ptr %dst 16
+  %d3 = ptr.offset ptr %dst 24
+  %av0 = load i64 %a
+  %av1 = load i64 %a1
+  %av2 = load i64 %a2
+  %av3 = load i64 %a3
+  %bv0 = load i64 %b
+  %bv1 = load i64 %b1
+  %bv2 = load i64 %b2
+  %bv3 = load i64 %b3
+  %cv0 = load i64 %c
+  %cv1 = load i64 %c1
+  %cv2 = load i64 %c2
+  %cv3 = load i64 %c3
+  %x0 = sub i64 %av0 %bv0
+  %x1 = sub i64 %av1 %bv1
+  %x2 = sub i64 %av2 %bv2
+  %x3 = sub i64 %av3 %bv3
+  %v0 = xor i64 %x0 %cv0
+  %v1 = xor i64 %x1 %cv1
+  %v2 = xor i64 %x2 %cv2
+  %v3 = xor i64 %x3 %cv3
+  store i64 %v0 %dst
+  store i64 %v1 %d1
+  store i64 %v2 %d2
+  store i64 %v3 %d3
+  return
+}
+})";
+    DifferentialModule slp_chained_i64_fixture(slp_chained_i64_module);
+    const std::array<std::uint64_t, 4> chain64_a{0ULL, 1ULL, 0xffffffffffffffffULL, 0x8000000000000000ULL};
+    const std::array<std::uint64_t, 4> chain64_b{1ULL, 3ULL, 0x123456789abcdef0ULL, 0x7fffffffffffffffULL};
+    const std::array<std::uint64_t, 4> chain64_c{0xffffffffffffffffULL, 7ULL, 0x0f0f0f0f0f0f0f0fULL, 0xaaaaaaaaaaaaaaaaULL};
+    slp_chained_i64_fixture.compare_void_ptr_ptr_ptr_ptr_i64("chain4_i64", chain64_a, chain64_b, chain64_c);
+
+    constexpr auto slp_deep_chain_module = R"(module @slp_deep_chain_runtime {
+func @chain4ops_i32(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %e: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %a2 = ptr.offset ptr %a 8
+  %a3 = ptr.offset ptr %a 12
+  %b1 = ptr.offset ptr %b 4
+  %b2 = ptr.offset ptr %b 8
+  %b3 = ptr.offset ptr %b 12
+  %c1 = ptr.offset ptr %c 4
+  %c2 = ptr.offset ptr %c 8
+  %c3 = ptr.offset ptr %c 12
+  %d1 = ptr.offset ptr %d 4
+  %d2 = ptr.offset ptr %d 8
+  %d3 = ptr.offset ptr %d 12
+  %e1 = ptr.offset ptr %e 4
+  %e2 = ptr.offset ptr %e 8
+  %e3 = ptr.offset ptr %e 12
+  %o1 = ptr.offset ptr %dst 4
+  %o2 = ptr.offset ptr %dst 8
+  %o3 = ptr.offset ptr %dst 12
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %av2 = load i32 %a2
+  %av3 = load i32 %a3
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %bv2 = load i32 %b2
+  %bv3 = load i32 %b3
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %cv2 = load i32 %c2
+  %cv3 = load i32 %c3
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %dv2 = load i32 %d2
+  %dv3 = load i32 %d3
+  %ev0 = load i32 %e
+  %ev1 = load i32 %e1
+  %ev2 = load i32 %e2
+  %ev3 = load i32 %e3
+  %x0 = xor i32 %av0 %bv0
+  %x1 = xor i32 %av1 %bv1
+  %x2 = xor i32 %av2 %bv2
+  %x3 = xor i32 %av3 %bv3
+  %y0 = add i32 %x0 %cv0
+  %y1 = add i32 %x1 %cv1
+  %y2 = add i32 %x2 %cv2
+  %y3 = add i32 %x3 %cv3
+  %z0 = and i32 %y0 %dv0
+  %z1 = and i32 %y1 %dv1
+  %z2 = and i32 %y2 %dv2
+  %z3 = and i32 %y3 %dv3
+  %v0 = sub i32 %z0 %ev0
+  %v1 = sub i32 %z1 %ev1
+  %v2 = sub i32 %z2 %ev2
+  %v3 = sub i32 %z3 %ev3
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  store i32 %v2 %o2
+  store i32 %v3 %o3
+  return
+}
+})";
+    DifferentialModule slp_deep_chain_fixture(slp_deep_chain_module);
+    const std::array<std::uint32_t, 4> deep_a{0U, 1U, 0xffffffffU, 0x80000000U};
+    const std::array<std::uint32_t, 4> deep_b{0xffffffffU, 3U, 0x12345678U, 0x7fffffffU};
+    const std::array<std::uint32_t, 4> deep_c{1U, 0xffffffffU, 0xeeeeeeeeU, 0x80000000U};
+    const std::array<std::uint32_t, 4> deep_d{0x0f0f0f0fU, 0xf0f0f0f0U, 0xaaaaaaaaU, 0x55555555U};
+    const std::array<std::uint32_t, 4> deep_e{7U, 11U, 0xffffffffU, 0x80000001U};
+    slp_deep_chain_fixture.compare_void_five_sources_i32("chain4ops_i32", deep_a, deep_b, deep_c, deep_d, deep_e);
+
+    constexpr auto slp_branching_dag_module = R"(module @slp_branching_dag_runtime {
+func @branching_i32(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %e: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %a2 = ptr.offset ptr %a 8
+  %a3 = ptr.offset ptr %a 12
+  %b1 = ptr.offset ptr %b 4
+  %b2 = ptr.offset ptr %b 8
+  %b3 = ptr.offset ptr %b 12
+  %c1 = ptr.offset ptr %c 4
+  %c2 = ptr.offset ptr %c 8
+  %c3 = ptr.offset ptr %c 12
+  %d1 = ptr.offset ptr %d 4
+  %d2 = ptr.offset ptr %d 8
+  %d3 = ptr.offset ptr %d 12
+  %e1 = ptr.offset ptr %e 4
+  %e2 = ptr.offset ptr %e 8
+  %e3 = ptr.offset ptr %e 12
+  %o1 = ptr.offset ptr %dst 4
+  %o2 = ptr.offset ptr %dst 8
+  %o3 = ptr.offset ptr %dst 12
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %av2 = load i32 %a2
+  %av3 = load i32 %a3
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %bv2 = load i32 %b2
+  %bv3 = load i32 %b3
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %cv2 = load i32 %c2
+  %cv3 = load i32 %c3
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %dv2 = load i32 %d2
+  %dv3 = load i32 %d3
+  %ev0 = load i32 %e
+  %ev1 = load i32 %e1
+  %ev2 = load i32 %e2
+  %ev3 = load i32 %e3
+  %l0 = xor i32 %av0 %bv0
+  %l1 = xor i32 %av1 %bv1
+  %l2 = xor i32 %av2 %bv2
+  %l3 = xor i32 %av3 %bv3
+  %r0 = and i32 %cv0 %dv0
+  %r1 = and i32 %cv1 %dv1
+  %r2 = and i32 %cv2 %dv2
+  %r3 = and i32 %cv3 %dv3
+  %m0 = add i32 %l0 %r0
+  %m1 = add i32 %l1 %r1
+  %m2 = add i32 %l2 %r2
+  %m3 = add i32 %l3 %r3
+  %v0 = sub i32 %m0 %ev0
+  %v1 = sub i32 %m1 %ev1
+  %v2 = sub i32 %m2 %ev2
+  %v3 = sub i32 %m3 %ev3
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  store i32 %v2 %o2
+  store i32 %v3 %o3
+  return
+}
+})";
+    DifferentialModule slp_branching_dag_fixture(slp_branching_dag_module);
+    slp_branching_dag_fixture.compare_void_five_sources_i32("branching_i32", deep_a, deep_b, deep_c, deep_d, deep_e);
+
+    constexpr auto slp_shared_dag_module = R"(module @slp_shared_dag_runtime {
+func @shared_i32(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %e: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %a2 = ptr.offset ptr %a 8
+  %a3 = ptr.offset ptr %a 12
+  %b1 = ptr.offset ptr %b 4
+  %b2 = ptr.offset ptr %b 8
+  %b3 = ptr.offset ptr %b 12
+  %c1 = ptr.offset ptr %c 4
+  %c2 = ptr.offset ptr %c 8
+  %c3 = ptr.offset ptr %c 12
+  %d1 = ptr.offset ptr %d 4
+  %d2 = ptr.offset ptr %d 8
+  %d3 = ptr.offset ptr %d 12
+  %e1 = ptr.offset ptr %e 4
+  %e2 = ptr.offset ptr %e 8
+  %e3 = ptr.offset ptr %e 12
+  %o1 = ptr.offset ptr %dst 4
+  %o2 = ptr.offset ptr %dst 8
+  %o3 = ptr.offset ptr %dst 12
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %av2 = load i32 %a2
+  %av3 = load i32 %a3
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %bv2 = load i32 %b2
+  %bv3 = load i32 %b3
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %cv2 = load i32 %c2
+  %cv3 = load i32 %c3
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %dv2 = load i32 %d2
+  %dv3 = load i32 %d3
+  %ev0 = load i32 %e
+  %ev1 = load i32 %e1
+  %ev2 = load i32 %e2
+  %ev3 = load i32 %e3
+  %s0 = xor i32 %av0 %bv0
+  %s1 = xor i32 %av1 %bv1
+  %s2 = xor i32 %av2 %bv2
+  %s3 = xor i32 %av3 %bv3
+  %l0 = add i32 %s0 %cv0
+  %l1 = add i32 %s1 %cv1
+  %l2 = add i32 %s2 %cv2
+  %l3 = add i32 %s3 %cv3
+  %r0 = and i32 %s0 %dv0
+  %r1 = and i32 %s1 %dv1
+  %r2 = and i32 %s2 %dv2
+  %r3 = and i32 %s3 %dv3
+  %m0 = add i32 %l0 %r0
+  %m1 = add i32 %l1 %r1
+  %m2 = add i32 %l2 %r2
+  %m3 = add i32 %l3 %r3
+  %v0 = xor i32 %m0 %ev0
+  %v1 = xor i32 %m1 %ev1
+  %v2 = xor i32 %m2 %ev2
+  %v3 = xor i32 %m3 %ev3
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  store i32 %v2 %o2
+  store i32 %v3 %o3
+  return
+}
+})";
+    DifferentialModule slp_shared_dag_fixture(slp_shared_dag_module);
+    slp_shared_dag_fixture.compare_void_five_sources_i32("shared_i32", deep_a, deep_b, deep_c, deep_d, deep_e);
+
+
+    const auto make_pressure_dag_source = [](bool interleave_stores) {
+        std::string source = "module @slp_pressure_dag_runtime {\nfunc @pressure_i32(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %e: ptr, %dst: ptr) -> void {\nentry:\n";
+        constexpr std::size_t lanes = 4U;
+        const std::array<std::string_view, 6> bases{"a", "b", "c", "d", "e", "dst"};
+        for (const auto base : bases) {
+            for (std::size_t lane = 1; lane < lanes; ++lane)
+                source += "  %" + std::string(base) + std::to_string(lane) + " = ptr.offset ptr %" + std::string(base) + " " + std::to_string(lane * 4U) + "\n";
+        }
+        for (const auto base : std::array<std::string_view, 5>{"a", "b", "c", "d", "e"}) {
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  %" + std::string(base) + "v" + std::to_string(lane) + " = load i32 %" + std::string(base) + (lane == 0U ? "" : std::to_string(lane)) + "\n";
+        }
+        const std::array<std::string_view, 5> operations{"xor", "and", "or", "add", "sub"};
+        for (std::size_t op = 0; op < operations.size(); ++op)
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  %s" + std::to_string(op) + "_" + std::to_string(lane) + " = " + std::string(operations[op]) + " i32 %av" + std::to_string(lane) + " %bv" + std::to_string(lane) + "\n";
+        for (std::size_t op = 0; op < operations.size(); ++op)
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  %t" + std::to_string(op) + "_" + std::to_string(lane) + " = " + std::string(operations[op]) + " i32 %cv" + std::to_string(lane) + " %dv" + std::to_string(lane) + "\n";
+        constexpr std::array<std::size_t, 5> rotated{1U, 2U, 3U, 4U, 0U};
+        for (std::size_t op = 0; op < operations.size(); ++op)
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  %p" + std::to_string(op) + "_" + std::to_string(lane) + " = add i32 %s" + std::to_string(op) + "_" + std::to_string(lane) + " %t" + std::to_string(op) + "_" + std::to_string(lane) + "\n";
+        for (std::size_t op = 0; op < operations.size(); ++op)
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  %q" + std::to_string(op) + "_" + std::to_string(lane) + " = xor i32 %s" + std::to_string(op) + "_" + std::to_string(lane) + " %t" + std::to_string(rotated[op]) + "_" + std::to_string(lane) + "\n";
+        for (std::size_t lane = 0; lane < lanes; ++lane) {
+            source += "  %pa0_" + std::to_string(lane) + " = add i32 %p0_" + std::to_string(lane) + " %p1_" + std::to_string(lane) + "\n";
+            source += "  %pa1_" + std::to_string(lane) + " = add i32 %pa0_" + std::to_string(lane) + " %p2_" + std::to_string(lane) + "\n";
+            source += "  %pa2_" + std::to_string(lane) + " = add i32 %pa1_" + std::to_string(lane) + " %p3_" + std::to_string(lane) + "\n";
+            source += "  %psum_" + std::to_string(lane) + " = add i32 %pa2_" + std::to_string(lane) + " %p4_" + std::to_string(lane) + "\n";
+            source += "  %qa0_" + std::to_string(lane) + " = add i32 %q0_" + std::to_string(lane) + " %q1_" + std::to_string(lane) + "\n";
+            source += "  %qa1_" + std::to_string(lane) + " = add i32 %qa0_" + std::to_string(lane) + " %q2_" + std::to_string(lane) + "\n";
+            source += "  %qa2_" + std::to_string(lane) + " = add i32 %qa1_" + std::to_string(lane) + " %q3_" + std::to_string(lane) + "\n";
+            source += "  %qsum_" + std::to_string(lane) + " = add i32 %qa2_" + std::to_string(lane) + " %q4_" + std::to_string(lane) + "\n";
+            source += "  %mix_" + std::to_string(lane) + " = xor i32 %psum_" + std::to_string(lane) + " %qsum_" + std::to_string(lane) + "\n";
+            source += "  %v" + std::to_string(lane) + " = add i32 %mix_" + std::to_string(lane) + " %ev" + std::to_string(lane) + "\n";
+            if (interleave_stores)
+                source += "  store i32 %v" + std::to_string(lane) + " %" +
+                          std::string(lane == 0U ? "dst" : "dst" + std::to_string(lane)) + "\n";
+        }
+        if (!interleave_stores)
+            for (std::size_t lane = 0; lane < lanes; ++lane)
+                source += "  store i32 %v" + std::to_string(lane) + " %" +
+                          std::string(lane == 0U ? "dst" : "dst" + std::to_string(lane)) + "\n";
+        source += "  return\n}\n}";
+        return source;
+    };
+    const auto pressure_dag_source = make_pressure_dag_source(false);
+    DifferentialModule slp_pressure_dag_fixture(pressure_dag_source);
+    slp_pressure_dag_fixture.compare_void_five_sources_i32("pressure_i32", deep_a, deep_b, deep_c, deep_d, deep_e);
+
+    // Keep the same high-pressure arithmetic but deliberately interleave the
+    // stores so the SLP matcher cannot collapse the function into a packed
+    // DAG. This exercises the scalar spill path that once corrupted a live
+    // pointer by using allocated r8/r9 as supposedly-private spill-cache
+    // registers. The result must remain correct even when both cache slots are
+    // unavailable under register pressure.
+    const auto scalar_pressure_source = make_pressure_dag_source(true);
+    DifferentialModule scalar_pressure_fixture(scalar_pressure_source);
+    scalar_pressure_fixture.compare_void_five_sources_i32("pressure_i32", deep_a, deep_b, deep_c, deep_d, deep_e);
+
+    constexpr auto slp_i32_module = R"(module @slp_i32_runtime {
+func @sum8(%base: ptr) -> i32 {
+entry:
+  %p1 = ptr.offset ptr %base 4
+  %p2 = ptr.offset ptr %base 8
+  %p3 = ptr.offset ptr %base 12
+  %p4 = ptr.offset ptr %base 16
+  %p5 = ptr.offset ptr %base 20
+  %p6 = ptr.offset ptr %base 24
+  %p7 = ptr.offset ptr %base 28
+  %v0 = load i32 %base
+  %v1 = load i32 %p1
+  %v2 = load i32 %p2
+  %v3 = load i32 %p3
+  %v4 = load i32 %p4
+  %v5 = load i32 %p5
+  %v6 = load i32 %p6
+  %v7 = load i32 %p7
+  %a0 = add i32 %v0 %v1
+  %a1 = add i32 %v2 %v3
+  %a2 = add i32 %v4 %v5
+  %a3 = add i32 %v6 %v7
+  %b0 = add i32 %a0 %a1
+  %b1 = add i32 %a2 %a3
+  %sum = add i32 %b0 %b1
+  return %sum
+}
+})";
+    DifferentialModule slp_i32_fixture(slp_i32_module);
+    const std::array<std::uint32_t, 8> slp_i32_small{1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U};
+    const std::array<std::uint32_t, 8> slp_i32_wrap{
+        0xfffffff0U, 0x20U, 0x80000000U, 0x80000000U, 7U, 9U, 11U, 13U};
+    slp_i32_fixture.compare_i32_ptr("sum8", slp_i32_small);
+    slp_i32_fixture.compare_i32_ptr("sum8", slp_i32_wrap);
 
     constexpr auto multi_recurrence_module = R"(module @multi_recurrence_runtime {
 func @fib(%n: i64) -> i64 {

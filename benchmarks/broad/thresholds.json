@@ -14,5 +14,16 @@
   "branch_merge_200": 2.35,
   "float_dot4": 1.4,
   "store_overwrite": 1.6,
-  "global_store_overwrite": 1.6
+  "global_store_overwrite": 1.6,
+  "memory_sum_i32_8": 2.25,
+  "memory_add4": 2.0,
+  "memory_xor4_i32": 2.0,
+  "memory_and4_i64": 2.0,
+  "memory_xor_copy8_i32": 2.0,
+  "memory_add_copy8_i32": 2.0,
+  "memory_chain_copy8_i32": 2.0,
+  "memory_deep_chain_copy8_i32": 2.0,
+  "memory_branch_dag_copy8_i32": 2.0,
+  "memory_shared_dag_copy8_i32": 2.0,
+  "memory_pressure_dag_copy8_i32": 2.0
 }

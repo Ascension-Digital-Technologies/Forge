@@ -47,6 +47,88 @@ Function make_executable(const std::vector<std::byte>& code, void*& memory, std:
 
 int main() {
     try {
+        {
+            const auto make_slp_cost_fixture = [] {
+                forge::machine::Function function;
+                function.name = "slp_cost_fixture";
+                function.register_count = 6;
+                function.register_widths = {8, 4, 4, 4, 4, 4};
+                function.register_classes.assign(function.register_count, forge::machine::RegisterClass::integer);
+                forge::machine::Block block;
+                block.name = "entry";
+                forge::machine::Instruction a0;
+                a0.opcode = forge::machine::Opcode::add_i32;
+                a0.result = 2;
+                a0.inputs = {1, 0};
+                a0.immediate = 0;
+                a0.symbol = "$memptr";
+                forge::machine::Instruction a1 = a0;
+                a1.result = 3;
+                a1.immediate = 4;
+                forge::machine::Instruction s0;
+                s0.opcode = forge::machine::Opcode::store_ptr_i32;
+                s0.inputs = {2, 0};
+                s0.immediate = 0;
+                forge::machine::Instruction s1 = s0;
+                s1.inputs = {3, 0};
+                s1.immediate = 4;
+                forge::machine::Instruction ret;
+                ret.opcode = forge::machine::Opcode::return_void;
+                block.instructions = {a0, a1, s0, s1, ret};
+                function.blocks.push_back(std::move(block));
+                return function;
+            };
+
+            auto unavailable = make_slp_cost_fixture();
+            auto no_vector = forge::machine::SlpCostModel::x86_64_sse2();
+            no_vector.vector_integer_available = false;
+            const auto unavailable_stats = forge::machine::optimize_function(unavailable, no_vector);
+            require(unavailable_stats.slp_candidates_rejected_target > 0,
+                    "SLP target-feature gate did not reject a legal pack");
+            require(forge::machine::print_module(forge::machine::Module{"test", {}, {unavailable}}).find("binary_i32_contiguous_inplace") == std::string::npos,
+                    "SLP packed despite unavailable target vector support");
+
+            auto expensive = make_slp_cost_fixture();
+            auto costly_vector = forge::machine::SlpCostModel::x86_64_sse2();
+            costly_vector.vector_integer_latency = 100.0;
+            costly_vector.vector_integer_throughput = 100.0;
+            const auto expensive_stats = forge::machine::optimize_function(expensive, costly_vector);
+            require(expensive_stats.slp_candidates_rejected_cost > 0,
+                    "SLP profitability gate did not reject an expensive legal pack");
+
+            auto profitable = make_slp_cost_fixture();
+            auto cheap_vector = forge::machine::SlpCostModel::x86_64_sse2();
+            cheap_vector.vector_integer_latency = 0.1;
+            cheap_vector.vector_integer_throughput = 0.1;
+            cheap_vector.vector_memory_cost = 0.1;
+            cheap_vector.vector_setup_cost = 0.0;
+            const auto profitable_stats = forge::machine::optimize_function(profitable, cheap_vector);
+            require(profitable_stats.slp_candidates_selected > 0,
+                    "SLP profitability gate did not select a profitable legal pack");
+            require(forge::machine::print_module(forge::machine::Module{"test", {}, {profitable}}).find("binary_i32_contiguous_inplace") != std::string::npos,
+                    "profitable SLP candidate was not packed");
+
+            require(profitable_stats.slp_estimated_scalar_cost > profitable_stats.slp_estimated_vector_cost,
+                    "SLP cost telemetry did not record a profitable scalar/vector comparison");
+            require(profitable_stats.slp_estimated_shuffle_cost > 0.0,
+                    "SLP broadcast/shuffle cost was not included in the selected scalar-map pack");
+            require(profitable_stats.slp_width_128_selected > 0,
+                    "current x86 backend did not report its selected 128-bit vector width");
+
+            const auto avx2 = forge::machine::SlpCostModel::x86_64_avx2();
+            require(avx2.avx && avx2.avx2 && avx2.vector_bits == 256,
+                    "AVX2 SLP target profile did not expose 256-bit hardware capability");
+            require(avx2.backend_vector_bits == 256 && avx2.effective_vector_bits() == 256,
+                    "AVX2 SLP profile did not expose native YMM backend emission");
+
+            const auto avx512 = forge::machine::SlpCostModel::x86_64_avx512();
+            require(avx512.avx512f && avx512.avx512bw && avx512.avx512vl && avx512.vector_bits == 512,
+                    "AVX-512 SLP target profile is missing required feature availability");
+            require(avx512.mask_register_budget == 7,
+                    "AVX-512 SLP target profile did not model the architectural mask-register budget");
+            require(avx512.backend_vector_bits == 512 && avx512.effective_vector_bits() == 512,
+                    "AVX-512 profile did not expose native ZMM backend emission");
+        }
         constexpr auto source = R"(module @native {
 func @calculate(%left: i32, %right: i32) -> i32 {
 entry:
@@ -124,6 +206,562 @@ entry:
         require(lowered.ok(), "IR to machine lowering failed");
         require(lowered.module->functions.size() == 7, "wrong machine function count");
         require(forge::machine::verify_module(*lowered.module).empty(), "valid machine IR failed verification");
+        {
+            constexpr auto reduction_source = R"(module @slp {
+func @sum8(%base: ptr) -> i64 {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %p4 = ptr.offset ptr %base 32
+  %p5 = ptr.offset ptr %base 40
+  %p6 = ptr.offset ptr %base 48
+  %p7 = ptr.offset ptr %base 56
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %v4 = load i64 %p4
+  %v5 = load i64 %p5
+  %v6 = load i64 %p6
+  %v7 = load i64 %p7
+  %a0 = add i64 %v0 %v1
+  %a1 = add i64 %v2 %v3
+  %a2 = add i64 %v4 %v5
+  %a3 = add i64 %v6 %v7
+  %b0 = add i64 %a0 %a1
+  %b1 = add i64 %a2 %a3
+  %sum = add i64 %b0 %b1
+  return %sum
+}
+})";
+            auto reduction_parsed = forge::ir::parse_module(reduction_source);
+            require(reduction_parsed.ok(), "SLP reduction fixture did not parse");
+            auto reduction_lowered = forge::machine::lower_module(*reduction_parsed.module);
+            require(reduction_lowered.ok(), "SLP reduction fixture did not lower");
+            require(forge::machine::verify_module(*reduction_lowered.module).empty(),
+                    "SLP reduction machine IR did not verify");
+            const auto reduction_machine = forge::machine::print_module(*reduction_lowered.module);
+            require(reduction_machine.find("reduce_add_i64_contiguous") != std::string::npos,
+                    "contiguous i64 reduction did not select packed machine reduction");
+            require(reduction_machine.find("load_ptr_i64") == std::string::npos,
+                    "packed i64 reduction retained redundant scalar loads");
+        }
+        {
+            constexpr auto reduction_i32_source = R"(module @slp_i32 {
+func @sum8_i32(%base: ptr) -> i32 {
+entry:
+  %p1 = ptr.offset ptr %base 4
+  %p2 = ptr.offset ptr %base 8
+  %p3 = ptr.offset ptr %base 12
+  %p4 = ptr.offset ptr %base 16
+  %p5 = ptr.offset ptr %base 20
+  %p6 = ptr.offset ptr %base 24
+  %p7 = ptr.offset ptr %base 28
+  %v0 = load i32 %base
+  %v1 = load i32 %p1
+  %v2 = load i32 %p2
+  %v3 = load i32 %p3
+  %v4 = load i32 %p4
+  %v5 = load i32 %p5
+  %v6 = load i32 %p6
+  %v7 = load i32 %p7
+  %a0 = add i32 %v0 %v1
+  %a1 = add i32 %v2 %v3
+  %a2 = add i32 %v4 %v5
+  %a3 = add i32 %v6 %v7
+  %b0 = add i32 %a0 %a1
+  %b1 = add i32 %a2 %a3
+  %sum = add i32 %b0 %b1
+  return %sum
+}
+})";
+            auto reduction_i32_parsed = forge::ir::parse_module(reduction_i32_source);
+            require(reduction_i32_parsed.ok(), "i32 SLP reduction fixture did not parse");
+            auto reduction_i32_lowered = forge::machine::lower_module(*reduction_i32_parsed.module);
+            require(reduction_i32_lowered.ok(), "i32 SLP reduction fixture did not lower");
+            require(forge::machine::verify_module(*reduction_i32_lowered.module).empty(),
+                    "i32 SLP reduction machine IR did not verify");
+            const auto reduction_i32_machine = forge::machine::print_module(*reduction_i32_lowered.module);
+            require(reduction_i32_machine.find("reduce_add_i32_contiguous") != std::string::npos,
+                    "contiguous i32 reduction did not select packed machine reduction");
+            require(reduction_i32_machine.find("load_ptr_i32") == std::string::npos,
+                    "packed i32 reduction retained redundant scalar loads");
+        }
+        {
+            constexpr auto map_add_source = R"(module @slp_map {
+func @add8(%base: ptr, %delta: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %p4 = ptr.offset ptr %base 32
+  %p5 = ptr.offset ptr %base 40
+  %p6 = ptr.offset ptr %base 48
+  %p7 = ptr.offset ptr %base 56
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %v4 = load i64 %p4
+  %v5 = load i64 %p5
+  %v6 = load i64 %p6
+  %v7 = load i64 %p7
+  %r0 = add i64 %v0 %delta
+  %r1 = add i64 %v1 %delta
+  %r2 = add i64 %v2 %delta
+  %r3 = add i64 %v3 %delta
+  %r4 = add i64 %v4 %delta
+  %r5 = add i64 %v5 %delta
+  %r6 = add i64 %v6 %delta
+  %r7 = add i64 %v7 %delta
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  store i64 %r4 %p4
+  store i64 %r5 %p5
+  store i64 %r6 %p6
+  store i64 %r7 %p7
+  return
+}
+})";
+            auto map_add_parsed = forge::ir::parse_module(map_add_source);
+            require(map_add_parsed.ok(), "SLP map-add fixture did not parse");
+            auto map_add_lowered = forge::machine::lower_module(*map_add_parsed.module);
+            require(map_add_lowered.ok(), "SLP map-add fixture did not lower");
+            require(forge::machine::verify_module(*map_add_lowered.module).empty(),
+                    "SLP map-add machine IR did not verify");
+            const auto map_add_machine = forge::machine::print_module(*map_add_lowered.module);
+            require(map_add_machine.find("binary_i64_contiguous_inplace") != std::string::npos,
+                    "contiguous i64 map-add did not select generic packed machine operation");
+            require(map_add_machine.find("store_ptr_i64") == std::string::npos,
+                    "packed i64 map-add retained scalar stores");
+            forge::machine::LowerOptions avx2_options;
+            avx2_options.slp_cost_model = forge::machine::SlpCostModel::x86_64_avx2();
+            auto map_add_avx2 = forge::machine::lower_module(*map_add_parsed.module, avx2_options);
+            require(map_add_avx2.ok(), "AVX2 SLP map-add fixture did not lower");
+            bool selected_ymm = false;
+            for (const auto& function : map_add_avx2.module->functions) {
+                for (const auto& block : function.blocks) {
+                    for (const auto& instruction : block.instructions) {
+                        if (instruction.opcode == forge::machine::Opcode::binary_i64_contiguous_inplace && instruction.vector_bits == 256U)
+                            selected_ymm = true;
+                    }
+                }
+            }
+            require(selected_ymm, "AVX2 lowering did not carry a 256-bit SLP decision into machine IR");
+            const auto avx2_encoded = forge::codegen::x86_64::encode(*map_add_avx2.module, forge::codegen::x86_64::Abi::system_v);
+            require(avx2_encoded.ok() && !avx2_encoded.functions.empty(), "AVX2 packed map-add did not encode");
+            const auto& avx2_code = avx2_encoded.functions.front().code;
+            require(std::find(avx2_code.begin(), avx2_code.end(), std::byte{0xC4}) != avx2_code.end(),
+                    "AVX2 packed map-add did not emit a three-byte VEX prefix");
+
+            forge::machine::LowerOptions avx512_options;
+            avx512_options.slp_cost_model = forge::machine::SlpCostModel::x86_64_avx512();
+            auto map_add_avx512 = forge::machine::lower_module(*map_add_parsed.module, avx512_options);
+            require(map_add_avx512.ok(), "AVX-512 SLP map-add fixture did not lower");
+            bool selected_zmm = false;
+            for (auto& function : map_add_avx512.module->functions) {
+                for (auto& block : function.blocks) {
+                    for (auto& instruction : block.instructions) {
+                        if (instruction.opcode == forge::machine::Opcode::binary_i64_contiguous_inplace && instruction.vector_bits == 512U) {
+                            selected_zmm = true;
+                            instruction.vector_mask_lanes = 5U;
+                        }
+                    }
+                }
+            }
+            require(selected_zmm, "AVX-512 lowering did not carry a 512-bit SLP decision into machine IR");
+            const auto avx512_encoded = forge::codegen::x86_64::encode(*map_add_avx512.module, forge::codegen::x86_64::Abi::system_v);
+            require(avx512_encoded.ok() && !avx512_encoded.functions.empty(), "AVX-512 packed map-add did not encode");
+            const auto& avx512_code = avx512_encoded.functions.front().code;
+            require(std::find(avx512_code.begin(), avx512_code.end(), std::byte{0x62}) != avx512_code.end(),
+                    "AVX-512 packed map-add did not emit an EVEX prefix");
+            const std::array<std::byte, 5> kmovw_r11{std::byte{0xC4}, std::byte{0xC1}, std::byte{0x78}, std::byte{0x92}, std::byte{0xCB}};
+            require(std::search(avx512_code.begin(), avx512_code.end(), kmovw_r11.begin(), kmovw_r11.end()) != avx512_code.end(),
+                    "AVX-512 packed map-add did not materialize its opmask with KMOVW");
+        }
+        {
+            constexpr auto loop_vector_source = R"(module @loop_vector {
+func @loop_add(%base: ptr, %count: i64, %delta: i64) -> void {
+entry:
+  %zero = const i64 0
+  %one = const i64 1
+  jump loop(%base, %count)
+loop(%p: ptr, %n: i64):
+  %done = cmp.eq i64 %n %zero
+  branch %done, exit(), body(%p, %n)
+body(%q: ptr, %m: i64):
+  %v = load i64 %q
+  %nv = add i64 %v %delta
+  store i64 %nv %q
+  %nextp = ptr.offset ptr %q 8
+  %nextn = sub i64 %m %one
+  jump loop(%nextp, %nextn)
+exit:
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(loop_vector_source);
+            require(parsed.ok(), "loop-vector fixture did not parse");
+            forge::machine::LowerOptions options;
+            options.slp_cost_model = forge::machine::SlpCostModel::x86_64_avx2();
+            auto lowered = forge::machine::lower_module(*parsed.module, options);
+            require(lowered.ok(), "loop-vector fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(),
+                    "loop-vector machine IR did not verify");
+            const auto machine = forge::machine::print_module(*lowered.module);
+            require(machine.find("loop.vector") != std::string::npos &&
+                    machine.find("binary_i64_contiguous_inplace [add_i64, lanes=4]") != std::string::npos,
+                    "canonical counted loop did not form a four-lane AVX2 vector loop");
+            require(machine.find("body(") != std::string::npos && machine.find("store_ptr_i64") != std::string::npos,
+                    "loop vectorization did not retain the scalar tail loop");
+            const auto encoded = forge::codegen::x86_64::encode(*lowered.module, forge::codegen::x86_64::Abi::system_v);
+            require(encoded.ok() && !encoded.functions.empty(), "loop-vector fixture did not encode");
+            const auto& code = encoded.functions.front().code;
+            require(std::find(code.begin(), code.end(), std::byte{0xC4}) != code.end(),
+                    "AVX2 vector loop did not emit VEX code");
+        }
+        {
+            constexpr auto expression_pack_source = R"(module @slp_expression_pack {
+func @xor4_i32(%base: ptr, %mask: i32) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 4
+  %p2 = ptr.offset ptr %base 8
+  %p3 = ptr.offset ptr %base 12
+  %v0 = load i32 %base
+  %v1 = load i32 %p1
+  %v2 = load i32 %p2
+  %v3 = load i32 %p3
+  %r0 = xor i32 %v0 %mask
+  %r1 = xor i32 %v1 %mask
+  %r2 = xor i32 %v2 %mask
+  %r3 = xor i32 %v3 %mask
+  store i32 %r0 %base
+  store i32 %r1 %p1
+  store i32 %r2 %p2
+  store i32 %r3 %p3
+  return
+}
+func @and4_i64(%base: ptr, %mask: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %r0 = and i64 %v0 %mask
+  %r1 = and i64 %v1 %mask
+  %r2 = and i64 %v2 %mask
+  %r3 = and i64 %v3 %mask
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  return
+}
+func @sub4_i64(%base: ptr, %delta: i64) -> void {
+entry:
+  %p1 = ptr.offset ptr %base 8
+  %p2 = ptr.offset ptr %base 16
+  %p3 = ptr.offset ptr %base 24
+  %v0 = load i64 %base
+  %v1 = load i64 %p1
+  %v2 = load i64 %p2
+  %v3 = load i64 %p3
+  %r0 = sub i64 %v0 %delta
+  %r1 = sub i64 %v1 %delta
+  %r2 = sub i64 %v2 %delta
+  %r3 = sub i64 %v3 %delta
+  store i64 %r0 %base
+  store i64 %r1 %p1
+  store i64 %r2 %p2
+  store i64 %r3 %p3
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(expression_pack_source);
+            require(parsed.ok(), "general SLP expression-pack fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "general SLP expression-pack fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(),
+                    "general SLP expression-pack machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_inplace") != std::string::npos,
+                    "contiguous i32 XOR pack did not select generic packed machine operation");
+            require(text.find("binary_i64_contiguous_inplace") != std::string::npos,
+                    "contiguous i64 AND pack did not select generic packed machine operation");
+            require(text.find("binary_i64_contiguous_inplace", text.find("binary_i64_contiguous_inplace") + 1U) != std::string::npos,
+                    "contiguous i64 subtraction did not select packed machine operation");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "packed i32 expression retained scalar stores");
+        }
+        {
+            constexpr auto map_source = R"(module @slp_copy_map {
+func @xor_copy4_i32(%src: ptr, %dst: ptr, %mask: i32) -> void {
+entry:
+  %s1 = ptr.offset ptr %src 4
+  %s2 = ptr.offset ptr %src 8
+  %s3 = ptr.offset ptr %src 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %v0 = load i32 %src
+  %v1 = load i32 %s1
+  %v2 = load i32 %s2
+  %v3 = load i32 %s3
+  %r0 = xor i32 %v0 %mask
+  %r1 = xor i32 %v1 %mask
+  %r2 = xor i32 %v2 %mask
+  %r3 = xor i32 %v3 %mask
+  store i32 %r0 %dst
+  store i32 %r1 %d1
+  store i32 %r2 %d2
+  store i32 %r3 %d3
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(map_source);
+            require(parsed.ok(), "out-of-place SLP map fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "out-of-place SLP map fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(),
+                    "out-of-place SLP map machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_map") != std::string::npos,
+                    "out-of-place contiguous i32 XOR did not select packed map operation");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "out-of-place packed i32 map retained scalar stores");
+        }
+        {
+            constexpr auto vector_map_source = R"(module @slp_vector_map {
+func @add4_i32(%lhs: ptr, %rhs: ptr, %dst: ptr) -> void {
+entry:
+  %l1 = ptr.offset ptr %lhs 4
+  %l2 = ptr.offset ptr %lhs 8
+  %l3 = ptr.offset ptr %lhs 12
+  %r1 = ptr.offset ptr %rhs 4
+  %r2 = ptr.offset ptr %rhs 8
+  %r3 = ptr.offset ptr %rhs 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %a0 = load i32 %lhs
+  %a1 = load i32 %l1
+  %a2 = load i32 %l2
+  %a3 = load i32 %l3
+  %b0 = load i32 %rhs
+  %b1 = load i32 %r1
+  %b2 = load i32 %r2
+  %b3 = load i32 %r3
+  %v0 = add i32 %a0 %b0
+  %v1 = add i32 %a1 %b1
+  %v2 = add i32 %a2 %b2
+  %v3 = add i32 %a3 %b3
+  store i32 %v0 %dst
+  store i32 %v1 %d1
+  store i32 %v2 %d2
+  store i32 %v3 %d3
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(vector_map_source);
+            require(parsed.ok(), "vector-to-vector SLP fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "vector-to-vector SLP fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(),
+                    "vector-to-vector SLP machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_map2") != std::string::npos,
+                    "vector-to-vector contiguous i32 add did not select packed map2 operation");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "vector-to-vector packed i32 map retained scalar stores");
+        }
+        {
+            constexpr auto chained_map_source = R"(module @slp_chained_map {
+func @chain4_i32(%a: ptr, %b: ptr, %c: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %a2 = ptr.offset ptr %a 8
+  %a3 = ptr.offset ptr %a 12
+  %b1 = ptr.offset ptr %b 4
+  %b2 = ptr.offset ptr %b 8
+  %b3 = ptr.offset ptr %b 12
+  %c1 = ptr.offset ptr %c 4
+  %c2 = ptr.offset ptr %c 8
+  %c3 = ptr.offset ptr %c 12
+  %d1 = ptr.offset ptr %dst 4
+  %d2 = ptr.offset ptr %dst 8
+  %d3 = ptr.offset ptr %dst 12
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %av2 = load i32 %a2
+  %av3 = load i32 %a3
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %bv2 = load i32 %b2
+  %bv3 = load i32 %b3
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %cv2 = load i32 %c2
+  %cv3 = load i32 %c3
+  %x0 = xor i32 %av0 %bv0
+  %x1 = xor i32 %av1 %bv1
+  %x2 = xor i32 %av2 %bv2
+  %x3 = xor i32 %av3 %bv3
+  %v0 = add i32 %x0 %cv0
+  %v1 = add i32 %x1 %cv1
+  %v2 = add i32 %x2 %cv2
+  %v3 = add i32 %x3 %cv3
+  store i32 %v0 %dst
+  store i32 %v1 %d1
+  store i32 %v2 %d2
+  store i32 %v3 %d3
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(chained_map_source);
+            require(parsed.ok(), "chained SLP fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "chained SLP fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(), "chained SLP machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_map3") != std::string::npos,
+                    "chained contiguous i32 expression did not select packed map3 operation");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "chained packed i32 map retained scalar stores");
+        }
+        {
+            constexpr auto deep_chain_source = R"(module @deep_chain {
+func @deep(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %e: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %b1 = ptr.offset ptr %b 4
+  %c1 = ptr.offset ptr %c 4
+  %d1 = ptr.offset ptr %d 4
+  %e1 = ptr.offset ptr %e 4
+  %o1 = ptr.offset ptr %dst 4
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %ev0 = load i32 %e
+  %ev1 = load i32 %e1
+  %x0 = xor i32 %av0 %bv0
+  %x1 = xor i32 %av1 %bv1
+  %y0 = add i32 %x0 %cv0
+  %y1 = add i32 %x1 %cv1
+  %z0 = and i32 %y0 %dv0
+  %z1 = and i32 %y1 %dv1
+  %v0 = sub i32 %z0 %ev0
+  %v1 = sub i32 %z1 %ev1
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(deep_chain_source);
+            require(parsed.ok(), "deep SLP chain fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "deep SLP chain fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(), "deep SLP chain machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_chain") != std::string::npos,
+                    "arbitrary-depth contiguous i32 expression did not select packed chain operation");
+            require(text.find("xor_i32 -> add_i32 -> and_i32 -> sub_i32") != std::string::npos,
+                    "packed chain did not preserve the full ordered operation sequence");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "arbitrary-depth packed i32 chain retained scalar stores");
+        }
+        {
+            constexpr auto branching_dag_source = R"(module @branching_dag {
+func @branch(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %b1 = ptr.offset ptr %b 4
+  %c1 = ptr.offset ptr %c 4
+  %d1 = ptr.offset ptr %d 4
+  %o1 = ptr.offset ptr %dst 4
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %l0 = xor i32 %av0 %bv0
+  %l1 = xor i32 %av1 %bv1
+  %r0 = and i32 %cv0 %dv0
+  %r1 = and i32 %cv1 %dv1
+  %v0 = add i32 %l0 %r0
+  %v1 = add i32 %l1 %r1
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(branching_dag_source);
+            require(parsed.ok(), "branching SLP DAG fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "branching SLP DAG fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(), "branching SLP DAG machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_dag") != std::string::npos,
+                    "branching contiguous i32 expression did not select packed DAG operation");
+            require(text.find("postfix: s0 s1 xor_i32 s2 s3 and_i32 add_i32") != std::string::npos,
+                    "packed DAG did not preserve branching postfix expression order");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "branching packed i32 DAG retained scalar stores");
+        }
+        {
+            constexpr auto shared_dag_source = R"(module @shared_dag {
+func @shared(%a: ptr, %b: ptr, %c: ptr, %d: ptr, %dst: ptr) -> void {
+entry:
+  %a1 = ptr.offset ptr %a 4
+  %b1 = ptr.offset ptr %b 4
+  %c1 = ptr.offset ptr %c 4
+  %d1 = ptr.offset ptr %d 4
+  %o1 = ptr.offset ptr %dst 4
+  %av0 = load i32 %a
+  %av1 = load i32 %a1
+  %bv0 = load i32 %b
+  %bv1 = load i32 %b1
+  %cv0 = load i32 %c
+  %cv1 = load i32 %c1
+  %dv0 = load i32 %d
+  %dv1 = load i32 %d1
+  %s0 = xor i32 %av0 %bv0
+  %s1 = xor i32 %av1 %bv1
+  %l0 = add i32 %s0 %cv0
+  %l1 = add i32 %s1 %cv1
+  %r0 = and i32 %s0 %dv0
+  %r1 = and i32 %s1 %dv1
+  %v0 = add i32 %l0 %r0
+  %v1 = add i32 %l1 %r1
+  store i32 %v0 %dst
+  store i32 %v1 %o1
+  return
+}
+})";
+            auto parsed = forge::ir::parse_module(shared_dag_source);
+            require(parsed.ok(), "shared-subexpression SLP DAG fixture did not parse");
+            auto lowered = forge::machine::lower_module(*parsed.module);
+            require(lowered.ok(), "shared-subexpression SLP DAG fixture did not lower");
+            require(forge::machine::verify_module(*lowered.module).empty(), "shared-subexpression SLP DAG machine IR did not verify");
+            const auto text = forge::machine::print_module(*lowered.module);
+            require(text.find("binary_i32_contiguous_dag_reuse") != std::string::npos,
+                    "shared packed expression did not select reusable DAG operation");
+            require(text.find("store_ptr_i32") == std::string::npos,
+                    "shared packed DAG retained scalar stores");
+        }
         {
             constexpr auto invalid_memory = R"(module @bad {
 func @overflow() -> i32 {
@@ -343,6 +981,41 @@ entry:
                 "call-crossing value was not assigned to a callee-saved register");
         require(call_aware_allocation.callee_saved_allocation_count >= 1,
                 "allocator did not report its callee-saved allocation");
+
+        // Windows x64 makes rdi/rsi nonvolatile. A leaf allocation must not
+        // treat the SysV argument registers as scratch unless the encoder also
+        // saves/restores them. This specifically guards the differential-test
+        // caller-state corruption that previously surfaced as a delayed SEGV.
+        forge::machine::Function windows_leaf;
+        windows_leaf.name = "windows_leaf_preserves_nonvolatile";
+        windows_leaf.argument_count = 2;
+        windows_leaf.argument_widths = {8, 8};
+        windows_leaf.argument_classes = {forge::machine::RegisterClass::integer,
+                                         forge::machine::RegisterClass::integer};
+        windows_leaf.register_count = 3;
+        windows_leaf.register_widths.assign(3, 8);
+        windows_leaf.register_classes.assign(3, forge::machine::RegisterClass::integer);
+        forge::machine::Block windows_leaf_entry;
+        windows_leaf_entry.name = "entry";
+        for (forge::machine::VirtualRegister reg = 0; reg < 2; ++reg) {
+            auto argument = make_float_instruction(forge::machine::Opcode::load_argument_i64, reg, {});
+            argument.argument_index = reg;
+            windows_leaf_entry.instructions.push_back(std::move(argument));
+        }
+        windows_leaf_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::add_i64, 2, {0, 1}));
+        windows_leaf_entry.instructions.push_back(
+            make_float_instruction(forge::machine::Opcode::return_i64, 0, {2}));
+        windows_leaf.blocks.push_back(std::move(windows_leaf_entry));
+        const auto windows_leaf_allocation = forge::machine::allocate_linear_scan(
+            windows_leaf, forge::target::NativeAbi::windows_x64);
+        require(windows_leaf_allocation.ok(), "Windows leaf allocation failed");
+        for (const auto& location : windows_leaf_allocation.locations) {
+            if (location.kind != forge::machine::LocationKind::physical_register) continue;
+            require(location.physical != forge::machine::PhysicalRegister::edi &&
+                    location.physical != forge::machine::PhysicalRegister::esi,
+                    "Windows leaf allocator used nonvolatile rdi/rsi as unsaved scratch registers");
+        }
 
         // True transition-based splitting: five values remain live across one
         // call, but the ABI has only two callee-saved allocation registers.

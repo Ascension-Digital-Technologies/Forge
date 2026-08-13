@@ -9,6 +9,7 @@ p.add_argument('--build',default='build/release-strict')
 p.add_argument('--samples',type=int,default=5)
 p.add_argument('--cc',default='clang')
 p.add_argument('--opt-level',choices=['O2','O3'],default='O2')
+p.add_argument('--x86-vector',choices=['sse2','sse41','avx','avx2','avx512'],default='avx512')
 p.add_argument('--check',action='store_true',help='fail when any kernel exceeds its independent ratio threshold')
 p.add_argument('--thresholds',default='benchmarks/broad/thresholds.json')
 a=p.parse_args()
@@ -46,7 +47,7 @@ def audit_no_benchmark_symbol_leakage():
 
 audit_no_benchmark_symbol_leakage()
 opt='-'+a.opt_level
-run([forge,'compile',root/'benchmarks/broad/kernels.fir','--format=elf',opt,'-o',out/'forge.o'])
+run([forge,'compile',root/'benchmarks/broad/kernels.fir','--format=elf',opt,'--x86-vector='+a.x86_vector,'-o',out/'forge.o'])
 run([a.cc,opt,'-c',root/'benchmarks/broad/reference.c','-o',out/'llvm.o'])
 run([a.cc,opt,root/'benchmarks/broad/harness.c',out/'forge.o',out/'llvm.o','-lm','-o',out/'broad-bench'])
 rows={}

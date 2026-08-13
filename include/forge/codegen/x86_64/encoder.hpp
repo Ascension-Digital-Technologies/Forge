@@ -28,6 +28,7 @@ struct EncodedFunction {
     std::vector<CallFixup> calls;
     std::vector<AddressFixup> addresses;
     std::vector<GlobalAddressFixup> global_addresses;
+    bool contains_packed_integer_simd{};
     std::uint32_t machine_instruction_count{};
     std::uint32_t machine_instruction_count_before_optimization{};
     std::uint32_t machine_instruction_eliminated_count{};
